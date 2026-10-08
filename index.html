@@ -10,7 +10,7 @@
 <meta name="apple-mobile-web-app-capable" content="yes">
 <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
 <meta name="apple-mobile-web-app-title" content="CAIPSD Attendance">
-<meta http-equiv="Content-Security-Policy" content="default-src 'none'; manifest-src 'self'; script-src 'sha256-++WEHnSnEEITJOnL4FuKJ5W+xnYACb34UZYASw9DyVU=' https://cdn.jsdelivr.net/npm/face-api.js@0.22.2/ https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@0.10.14/ 'wasm-unsafe-eval'; style-src 'unsafe-inline' https://fonts.googleapis.com; font-src https://fonts.gstatic.com; img-src 'self' data: blob:; media-src 'self' blob:; connect-src https://cdn.jsdelivr.net/npm/@vladmandic/face-api@1.7.13/model/ https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@0.10.14/ https://storage.googleapis.com/mediapipe-models/face_landmarker/ https://script.google.com/macros/s/ https://script.googleusercontent.com data: blob:; worker-src 'self' blob: https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@0.10.14/; base-uri 'none'; form-action 'none'; object-src 'none'">
+<meta http-equiv="Content-Security-Policy" content="default-src 'none'; manifest-src 'self'; script-src 'sha256-xNqKZsH5Dog6nNRoFZjNyWsoV9s1jfLarCi+VuCTjZo=' https://cdn.jsdelivr.net/npm/face-api.js@0.22.2/ https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@0.10.14/ 'wasm-unsafe-eval'; style-src 'unsafe-inline' https://fonts.googleapis.com; font-src https://fonts.gstatic.com; img-src 'self' data: blob:; media-src 'self' blob:; connect-src https://cdn.jsdelivr.net/npm/@vladmandic/face-api@1.7.13/model/ https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@0.10.14/ https://storage.googleapis.com/mediapipe-models/face_landmarker/ https://script.google.com/macros/s/ https://script.googleusercontent.com data: blob:; worker-src 'self' blob: https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@0.10.14/; base-uri 'none'; form-action 'none'; object-src 'none'">
 <meta name="referrer" content="no-referrer">
 <meta name="robots" content="noindex, nofollow">
 <title>CAIPSD Attendance</title>
@@ -798,10 +798,7 @@ function mpStep() {
 }
 
 // a face filling a good part of the picture is found just as well at 160 px, in about half the time
-function idInputSize() {
-  let w = 0; for (const tr of tracks) if (tr.target && tr.target.w > w) w = tr.target.w;
-  return video && video.videoWidth && w > video.videoWidth * 0.28 ? 160 : ID_INPUT_SIZE;
-}
+function idInputSize() { return ID_INPUT_SIZE; }   // keep one size: changing it makes the GPU recompile (stutter)
 function needsIdentity(t) {
   if (mode === 'enroll') return tracks.length > 0 && t - lastEnrollIdAt > 250;
   return tracks.some(tr => t - tr.lastSeen < 300 && (tr.name === null || (tr.name === 'Unknown' && t - tr.lastIdAt > ID_RETRY_MS) || t - tr.lastIdAt > ID_REVERIFY_MS));
@@ -961,7 +958,7 @@ function setFrameState(st, has) {
 
 let lastFrameT = 0, drewLast = false, frameEma = 16, slowFrames = 0, perfFrom = Infinity;
 // weaker computers and phones start in lite mode straight away (no glass blur over the live video)
-const WEAK_DEVICE = (navigator.hardwareConcurrency || 8) <= 4 || (navigator.deviceMemory || 8) <= 4;
+const WEAK_DEVICE = (navigator.hardwareConcurrency || 8) <= 4 || (navigator.deviceMemory || 8) <= 4 || matchMedia('(pointer: coarse)').matches;
 if (WEAK_DEVICE) document.body.classList.add('lite');
 const isLite = () => document.body.classList.contains('lite');
 function render(ts) {
@@ -1400,6 +1397,14 @@ async function warmDetector() {
     await faceapi.detectFaceLandmarks(blankCanvas(112));
   } catch (e) {}
 }
+async function warmIdentity() {
+  await timeout(50);
+  try { await faceapi.detectAllFaces(blankCanvas(ID_INPUT_SIZE), new faceapi.TinyFaceDetectorOptions({ inputSize: ID_INPUT_SIZE, scoreThreshold: 0.45 })); } catch (e) {}
+  await timeout(30);
+  try { await faceapi.detectFaceLandmarks(blankCanvas(112)); } catch (e) {}
+  await timeout(30);
+  await warmDescriptor();
+}
 async function warmDescriptor() { try { await faceapi.computeFaceDescriptor(blankCanvas(150)); } catch (e) {} }
 const timeout = (ms) => new Promise(res => setTimeout(res, ms));
 
@@ -1445,11 +1450,10 @@ async function init() {
   // ---- face engine (background) ----
   await libP;
   try { await faceapi.tf.setBackend('webgl'); await faceapi.tf.ready(); } catch (e) { console.warn('WebGL unavailable', e); }
-  // The recognition model (~6 MB) loads in parallel with the small ones and is warmed up before use.
-  faceapi.nets.faceRecognitionNet.loadFromUri(MODEL_URL)
-    .then(warmDescriptor)
-    .then(() => { recogReady = true; tracks.forEach(t => { t.name = null; }); })
-    .catch(err => { console.error('Recognition model failed', err); recogFailed = true; });
+  // Small models first (they're needed to see a face); the big recognition model is downloaded meanwhile
+  // but only set up afterwards, so the two don't fight over the graphics chip.
+  const recogFile = faceapi.nets.faceRecognitionNet.loadFromUri(MODEL_URL);
+  recogFile.catch(() => {});
   await Promise.all([
     faceapi.nets.tinyFaceDetector.loadFromUri(MODEL_URL),
     faceapi.nets.faceLandmark68Net.loadFromUri(MODEL_URL)
@@ -1458,6 +1462,10 @@ async function init() {
   engineReady = true;
   if (!tracks.length) setStatus('Look at the camera and blink once.', 'wait');
   faLoop();
+  recogFile
+    .then(warmIdentity)   // prepares the exact recognition steps used at check-in, so the first person never hits a freeze
+    .then(() => { recogReady = true; tracks.forEach(t => { t.name = null; }); })
+    .catch(err => { console.error('Recognition model failed', err); recogFailed = true; });
   perfFrom = performance.now() + 6000;   // ignore start-up warm-up when judging speed
 }
 
