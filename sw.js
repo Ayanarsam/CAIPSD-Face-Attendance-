@@ -1,7 +1,7 @@
 /* CAIPSD Rollcall service worker: keeps the face models and engines on the device,
    so the app starts fast and still opens when the internet is down. */
 const CACHE = 'rollcall-assets-v1';
-const PAGE_CACHE = 'rollcall-page-v2';
+const PAGE_CACHE = 'rollcall-page-v3';
 
 // Versioned files that never change at the same URL: serve from the device first.
 const ASSET_HOSTS = ['cdn.jsdelivr.net', 'storage.googleapis.com', 'fonts.gstatic.com'];
@@ -21,7 +21,7 @@ self.addEventListener('fetch', (e) => {
   const url = new URL(req.url);
 
   if (req.mode === 'navigate' && url.origin === self.location.origin) {
-    e.respondWith(pageFirst(req));
+    e.respondWith(pageFirst(e));
   } else if (ASSET_HOSTS.includes(url.hostname)) {
     e.respondWith(deviceFirst(req));
   } else if (url.hostname === 'fonts.googleapis.com') {
@@ -42,15 +42,25 @@ async function deviceFirst(req, refresh) {
   return res;
 }
 
-// The page itself: get the latest version, but fall back to the saved copy if the network is slow or down.
-async function pageFirst(req) {
+// The page itself: open the saved copy instantly, fetch the newest version in the background,
+// and tell the app when a newer version has arrived (it reloads itself when nobody is at the camera).
+async function pageFirst(e) {
   const cache = await caches.open(PAGE_CACHE);
-  const net = fetch(req.url, { cache: 'no-store', credentials: 'same-origin' }).then(   // always ask GitHub for the newest page, never the browser's old copy
-    res => { if (res.ok) cache.put(req, res.clone()); return res; });
-  try {
-    return await Promise.race([net, new Promise((_, rej) => setTimeout(() => rej(new Error('slow network')), 3000))]);
-  } catch (err) {
-    const hit = await cache.match(req, { ignoreSearch: true });
-    return hit || net;   // nothing saved yet: keep waiting for the network
-  }
+  const key = new Request(new URL(e.request.url).pathname);
+  const hit = await cache.match(key);
+  const oldText = hit ? await hit.clone().text() : null;
+  const net = fetch(e.request.url, { cache: 'no-store', credentials: 'same-origin' }).then(async res => {
+    if (res.ok && res.type === 'basic') {
+      const fresh = await res.clone().text();
+      await cache.put(key, res.clone());
+      if (oldText !== null && oldText !== fresh) notifyUpdate();
+    }
+    return res;
+  });
+  if (hit) { e.waitUntil(net.catch(() => {})); return hit; }   // instant open; the download only refreshes the saved copy
+  return net;                                                  // first visit: nothing saved yet
+}
+
+async function notifyUpdate() {
+  for (const c of await self.clients.matchAll({ type: 'window' })) c.postMessage({ type: 'page-updated' });
 }

@@ -10,7 +10,7 @@
 <meta name="apple-mobile-web-app-capable" content="yes">
 <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
 <meta name="apple-mobile-web-app-title" content="CAIPSD Attendance">
-<meta http-equiv="Content-Security-Policy" content="default-src 'none'; manifest-src 'self'; script-src 'sha256-kd38nNTrR8kuBrmtp4Br5SF8Rkpa87K2EjAIWPeJJ+4=' https://cdn.jsdelivr.net/npm/face-api.js@0.22.2/ https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@0.10.14/ 'wasm-unsafe-eval'; style-src 'unsafe-inline' https://fonts.googleapis.com; font-src https://fonts.gstatic.com; img-src 'self' data: blob:; media-src 'self' blob:; connect-src https://cdn.jsdelivr.net/npm/@vladmandic/face-api@1.7.13/model/ https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@0.10.14/ https://storage.googleapis.com/mediapipe-models/face_landmarker/ https://script.google.com/macros/s/ https://script.googleusercontent.com data: blob:; worker-src 'self' blob: https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@0.10.14/; base-uri 'none'; form-action 'none'; object-src 'none'">
+<meta http-equiv="Content-Security-Policy" content="default-src 'none'; manifest-src 'self'; script-src 'sha256-TrANoLKWxrowzFjFF57VCpow1mJ9+6ppwwuEY9VxugU=' https://cdn.jsdelivr.net/npm/face-api.js@0.22.2/ https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@0.10.14/ 'wasm-unsafe-eval'; style-src 'unsafe-inline' https://fonts.googleapis.com; font-src https://fonts.gstatic.com; img-src 'self' data: blob:; media-src 'self' blob:; connect-src https://cdn.jsdelivr.net/npm/@vladmandic/face-api@1.7.13/model/ https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@0.10.14/ https://storage.googleapis.com/mediapipe-models/face_landmarker/ https://script.google.com/macros/s/ https://script.googleusercontent.com data: blob:; worker-src 'self' blob: https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@0.10.14/; base-uri 'none'; form-action 'none'; object-src 'none'">
 <meta name="referrer" content="no-referrer">
 <meta name="robots" content="noindex, nofollow">
 <title>CAIPSD Attendance</title>
@@ -687,7 +687,7 @@ async function startCamera() {
     video.classList.toggle('mirror', facing === 'user');
     await new Promise(res => { if (video.readyState >= 1) res(); else video.onloadedmetadata = res; });
     video.play().catch(() => {});
-    setStatus('Camera ready. Look at the camera.', 'wait');
+    setStatus(engineReady ? 'Camera ready. Look at the camera.' : 'Starting face engine…', 'wait');
   } catch (err) {
     setStatus(err.name === 'NotAllowedError' ? 'Camera blocked. Allow camera access and reload.' : 'Camera error: ' + err.message, 'err');
   }
@@ -1404,12 +1404,14 @@ async function warmDescriptor() { try { await faceapi.computeFaceDescriptor(blan
 const timeout = (ms) => new Promise(res => setTimeout(res, ms));
 
 /* ---------- boot ---------- */
+let engineReady = false;
 async function init() {
   video = $('video'); overlay = $('overlay'); ctx = overlay.getContext('2d');
   const fontCss = $('fontCss'); if (fontCss) fontCss.media = 'all';   // font CSS no longer blocks first paint
   if (!window.crypto || !crypto.subtle) { $('splashStatus').textContent = 'Please open this page over HTTPS.'; return; }
+  const t0 = performance.now();
 
-  // face-api.js is deferred (so the splash paints instantly); wait for it here
+  // face-api.js is deferred (so the splash paints instantly); it keeps loading in the background
   const libEl = $('faceLib');
   const libP = new Promise((res, rej) => {
     if (window.faceapi) return res();
@@ -1417,30 +1419,16 @@ async function init() {
     libEl.addEventListener('error', () => rej(new Error('Could not load the face library. Check your internet connection.')));
   });
 
-  setProgress(10, 'Starting camera…');
-  const camP = startCamera();                 // camera permission prompt appears while the library downloads
+  setProgress(30, 'Starting camera…');
+  const camP = startCamera();                 // camera and stored data start together
   const dataP = loadData();
+  camP.then(() => loadMediapipe());          // fast blink engine loads alongside everything else
 
-  setProgress(22, 'Loading face engine…');
-  await libP;
-  try { await faceapi.tf.setBackend('webgl'); await faceapi.tf.ready(); } catch (e) { console.warn('WebGL unavailable', e); }
-  // The recognition model (~6 MB) starts downloading right away, in parallel with the small ones, and is warmed up before use.
-  const recogP = faceapi.nets.faceRecognitionNet.loadFromUri(MODEL_URL)
-    .then(warmDescriptor)
-    .then(() => { recogReady = true; tracks.forEach(t => { t.name = null; }); })
-    .catch(err => { console.error('Recognition model failed', err); recogFailed = true; });
-  setProgress(42, 'Loading face models…');
-  let loaded = 0;
-  const tick = () => setProgress(42 + (++loaded) * 20, 'Loading face models…');
-  // Only the two small models (~0.5 MB) block startup.
-  await Promise.all([
-    faceapi.nets.tinyFaceDetector.loadFromUri(MODEL_URL).then(tick),
-    faceapi.nets.faceLandmark68Net.loadFromUri(MODEL_URL).then(tick)
-  ]);
-  setProgress(90, 'Warming up…');
-  await Promise.all([dataP, Promise.race([warmDetector(), timeout(1500)])]);
+  // Open the app as soon as the stored data is ready; the face engine finishes loading behind it.
+  await dataP;
   setProgress(100, 'Ready');
-
+  const minSplash = 450 - (performance.now() - t0);   // just long enough for the logo animation not to flicker
+  if (minSplash > 0) await timeout(minSplash);
   renderEnrolledList(); renderLog();
   const tickClock = () => { const n = new Date(); $('clock').textContent = n.toLocaleTimeString([], { hour: 'numeric', minute: '2-digit' }); $('todayDate').textContent = n.toLocaleDateString('en-US', { weekday: 'short', month: 'short', day: 'numeric', year: 'numeric' }); };
   tickClock(); setInterval(tickClock, 15000);
@@ -1450,9 +1438,26 @@ async function init() {
   $('splash').classList.add('out'); setTimeout(() => { $('splash').remove(); app.classList.remove('enter'); }, 700);
   unlockAudio();
   outboxReady = true; flushOutbox();   // send anything saved while the device was offline
-  faLoop(); requestAnimationFrame(render);
+  requestAnimationFrame(render);
+  setStatus('Starting face engine…', 'wait');
+
+  // ---- face engine (background) ----
+  await libP;
+  try { await faceapi.tf.setBackend('webgl'); await faceapi.tf.ready(); } catch (e) { console.warn('WebGL unavailable', e); }
+  // The recognition model (~6 MB) loads in parallel with the small ones and is warmed up before use.
+  faceapi.nets.faceRecognitionNet.loadFromUri(MODEL_URL)
+    .then(warmDescriptor)
+    .then(() => { recogReady = true; tracks.forEach(t => { t.name = null; }); })
+    .catch(err => { console.error('Recognition model failed', err); recogFailed = true; });
+  await Promise.all([
+    faceapi.nets.tinyFaceDetector.loadFromUri(MODEL_URL),
+    faceapi.nets.faceLandmark68Net.loadFromUri(MODEL_URL)
+  ]);
+  await Promise.race([warmDetector(), timeout(1500)]);
+  engineReady = true;
+  if (!tracks.length) setStatus('Look at the camera and blink once.', 'wait');
+  faLoop();
   perfFrom = performance.now() + 6000;   // ignore start-up warm-up when judging speed
-  camP.then(() => loadMediapipe());   // fast blink engine; face-api covers blinks until it arrives
 }
 
 $('tabRecognize').addEventListener('click', () => setMode('recognize'));
@@ -1518,10 +1523,12 @@ if ('serviceWorker' in navigator && location.protocol === 'https:') {
   let reloading = false;
   const reloadWhenFree = () => {
     if (reloading) return;
-    if (hadFaceRecently()) { setTimeout(reloadWhenFree, 5000); return; }
+    const typing = document.activeElement && /^(INPUT|TEXTAREA)$/.test(document.activeElement.tagName);
+    if (hadFaceRecently() || mode === 'enroll' || typing) { setTimeout(reloadWhenFree, 5000); return; }
     reloading = true; location.reload();
   };
   navigator.serviceWorker.addEventListener('controllerchange', () => { if (hadController) reloadWhenFree(); });
+  navigator.serviceWorker.addEventListener('message', (e) => { if (e.data && e.data.type === 'page-updated') reloadWhenFree(); });
   window.addEventListener('load', () => navigator.serviceWorker.register('sw.js', { updateViaCache: 'none' }).then(reg => {
     setInterval(() => reg.update().catch(() => {}), 15 * 60 * 1000);
     document.addEventListener('visibilitychange', () => { if (!document.hidden) reg.update().catch(() => {}); });
@@ -1529,7 +1536,7 @@ if ('serviceWorker' in navigator && location.protocol === 'https:') {
 }
 function hadFaceRecently() { return (typeof lastFaceAt === 'number' && performance.now() - lastFaceAt < 8000) || tracks.length > 0; }
 
-init().catch(err => { console.error(err); $('splashStatus').textContent = 'Failed to load: ' + err.message; });
+init().catch(err => { console.error(err); const sp = $('splashStatus'); if (sp && document.body.contains(sp)) sp.textContent = 'Failed to load: ' + err.message; else setStatus('Face engine failed to load: ' + err.message + ' Reload the page.', 'err', 60000); });
 })();
 </script>
 </body>
