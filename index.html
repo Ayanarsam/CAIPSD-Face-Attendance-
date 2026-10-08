@@ -10,7 +10,7 @@
 <meta name="apple-mobile-web-app-capable" content="yes">
 <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
 <meta name="apple-mobile-web-app-title" content="Rollcall">
-<meta http-equiv="Content-Security-Policy" content="default-src 'none'; manifest-src 'self'; script-src 'sha256-OSvNl66ETbUJmKyUwUID+X+zqMbfrNNd76ry1J3Z378=' https://cdn.jsdelivr.net/npm/face-api.js@0.22.2/ https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@0.10.14/ 'wasm-unsafe-eval'; style-src 'unsafe-inline' https://fonts.googleapis.com; font-src https://fonts.gstatic.com; img-src 'self' data: blob:; media-src 'self' blob:; connect-src https://cdn.jsdelivr.net/npm/@vladmandic/face-api@1.7.13/model/ https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@0.10.14/ https://storage.googleapis.com/mediapipe-models/face_landmarker/ https://script.google.com/macros/s/ https://script.googleusercontent.com data: blob:; worker-src 'self' blob: https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@0.10.14/; base-uri 'none'; form-action 'none'; object-src 'none'">
+<meta http-equiv="Content-Security-Policy" content="default-src 'none'; manifest-src 'self'; script-src 'sha256-wI9ifpg549HZ1MC7KSf0/isNCEnh5KIStKu8Jx8mJVw=' https://cdn.jsdelivr.net/npm/face-api.js@0.22.2/ https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@0.10.14/ 'wasm-unsafe-eval'; style-src 'unsafe-inline' https://fonts.googleapis.com; font-src https://fonts.gstatic.com; img-src 'self' data: blob:; media-src 'self' blob:; connect-src https://cdn.jsdelivr.net/npm/@vladmandic/face-api@1.7.13/model/ https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@0.10.14/ https://storage.googleapis.com/mediapipe-models/face_landmarker/ https://script.google.com/macros/s/ https://script.googleusercontent.com data: blob:; worker-src 'self' blob: https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@0.10.14/; base-uri 'none'; form-action 'none'; object-src 'none'">
 <meta name="referrer" content="no-referrer">
 <meta name="robots" content="noindex, nofollow">
 <title>CAIPSD Attendance</title>
@@ -117,6 +117,12 @@
   .titles { min-width: 0; }
   .app-title { font-size: 16px; font-weight: 800; line-height: 1.2; }
   .app-sub { font-size: 12px; color: var(--ink-soft); margin-top: 2px; line-height: 1.35; }
+  .install-btn { display: inline-flex; align-items: center; gap: 6px; min-height: 36px; padding: 0 14px; border-radius: 999px; border: 1px solid rgba(212,175,55,.6); background: linear-gradient(135deg, var(--navy-800), var(--brand)); color: #fff; font: inherit; font-size: 12.5px; font-weight: 800; white-space: nowrap; cursor: pointer; box-shadow: 0 6px 16px -8px rgba(11,43,110,.7); transition: transform .25s var(--spring); }
+  .install-btn svg { color: var(--gold-bright); }
+  .install-btn:hover { transform: translateY(-1px); }
+  .install-btn:focus-visible { outline: 2px solid var(--gold); outline-offset: 2px; }
+  .install-btn[hidden] { display: none; }
+  @media (max-width: 520px) { .install-btn span { display: none; } .install-btn { padding: 0 10px; } }
   .top-right { margin-left: auto; display: flex; align-items: center; gap: 14px; flex-shrink: 0; }
   .live { display: inline-flex; align-items: center; gap: 7px; font-size: 12px; font-weight: 700; color: var(--ok); background: rgba(226,248,238,.75); border: 1px solid rgba(23,145,95,.2); padding: 6px 12px; border-radius: 999px; white-space: nowrap; }
   .live::before { content: ""; width: 7px; height: 7px; border-radius: 50%; background: var(--ok); animation: pulse 1.6s infinite; }
@@ -396,6 +402,7 @@
         <div class="app-sub">Centre of AI &amp; Professional Skills Development, The Islamia University of Bahawalpur</div>
       </div>
       <div class="top-right">
+        <button class="install-btn" id="btnInstall" type="button" hidden title="Install Rollcall on this device"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" aria-hidden="true"><path d="M12 4v11m0 0-4.5-4.5M12 15l4.5-4.5M5 19h14" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"/></svg><span>Install app</span></button>
         <div class="live">Live camera</div>
         <div class="when"><div class="clock" id="clock"></div><div class="today" id="todayDate"></div></div>
       </div>
@@ -675,7 +682,7 @@ async function loadData() {
 async function startCamera() {
   stopCamera();
   try {
-    mediaStream = await navigator.mediaDevices.getUserMedia({ video: { facingMode: facing, width: { ideal: 640 }, height: { ideal: 480 } }, audio: false });
+    mediaStream = await navigator.mediaDevices.getUserMedia({ video: { facingMode: facing, width: { ideal: 640 }, height: { ideal: 480 }, frameRate: { ideal: 30, max: 30 } }, audio: false });
     video.srcObject = mediaStream;
     video.classList.toggle('mirror', facing === 'user');
     await new Promise(res => { if (video.readyState >= 1) res(); else video.onloadedmetadata = res; });
@@ -723,7 +730,7 @@ async function loadMediapipe() {
     const fs = await FilesetResolver.forVisionTasks("https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@0.10.14/wasm");
     const make = (delegate) => FaceLandmarker.createFromOptions(fs, {
       baseOptions: { modelAssetPath: "https://storage.googleapis.com/mediapipe-models/face_landmarker/face_landmarker/float16/1/face_landmarker.task", delegate },
-      outputFaceBlendshapes: true, runningMode: "VIDEO", numFaces: 2, minFaceDetectionConfidence: 0.5, minTrackingConfidence: 0.5
+      outputFaceBlendshapes: true, runningMode: "VIDEO", numFaces: WEAK_DEVICE ? 1 : 2, minFaceDetectionConfidence: 0.5, minTrackingConfidence: 0.5
     });
     try { faceLandmarker = await make('GPU'); } catch (e) { faceLandmarker = await make('CPU'); }
     engine = 'mp'; tracks = [];
@@ -743,7 +750,7 @@ async function faFrame() {
   if (document.hidden || !video || video.readyState < 2 || !video.videoWidth) { hadFace = false; return; }
   const t = performance.now();
   const withId = recogReady && needsIdentity(t);
-  const opts = new faceapi.TinyFaceDetectorOptions({ inputSize: withId ? ID_INPUT_SIZE : FAST_INPUT_SIZE, scoreThreshold: 0.5 });
+  const opts = new faceapi.TinyFaceDetectorOptions({ inputSize: withId ? idInputSize() : FAST_INPUT_SIZE, scoreThreshold: 0.5 });
   const dets = withId
     ? await faceapi.detectAllFaces(video, opts).withFaceLandmarks().withFaceDescriptors()
     : await faceapi.detectAllFaces(video, opts).withFaceLandmarks();
@@ -790,6 +797,11 @@ function mpStep() {
   if (recogReady && !idBusy && needsIdentity(performance.now())) runIdentity();
 }
 
+// a face filling a good part of the picture is found just as well at 160 px, in about half the time
+function idInputSize() {
+  let w = 0; for (const tr of tracks) if (tr.target && tr.target.w > w) w = tr.target.w;
+  return video && video.videoWidth && w > video.videoWidth * 0.28 ? 160 : ID_INPUT_SIZE;
+}
 function needsIdentity(t) {
   if (mode === 'enroll') return tracks.length > 0 && t - lastEnrollIdAt > 250;
   return tracks.some(tr => t - tr.lastSeen < 300 && (tr.name === null || (tr.name === 'Unknown' && t - tr.lastIdAt > ID_RETRY_MS) || t - tr.lastIdAt > ID_REVERIFY_MS));
@@ -799,7 +811,7 @@ async function runIdentity() {
   if (performance.now() < idNextAt) return;
   idBusy = true; const t0 = performance.now();
   try {
-    const opts = new faceapi.TinyFaceDetectorOptions({ inputSize: ID_INPUT_SIZE, scoreThreshold: 0.45 });
+    const opts = new faceapi.TinyFaceDetectorOptions({ inputSize: idInputSize(), scoreThreshold: 0.45 });
     const dets = await faceapi.detectAllFaces(video, opts).withFaceLandmarks().withFaceDescriptors();
     applyIdentity(dets, performance.now());
   } catch (e) { console.warn('Identity pass failed', e); }
@@ -1467,6 +1479,26 @@ document.addEventListener('keydown', e => {
   const k = (e.key || '').toLowerCase(), mod = e.ctrlKey || e.metaKey;
   if (k === 'f12' || (mod && e.shiftKey && (k === 'i' || k === 'j' || k === 'c')) || (mod && (k === 'u' || k === 's'))) { e.preventDefault(); e.stopPropagation(); }
 }, true);
+
+// "Install app" button: shown only when this device can install Rollcall and it isn't installed yet
+let installEvt = null;
+const isInstalled = () => matchMedia('(display-mode: fullscreen)').matches || matchMedia('(display-mode: standalone)').matches || navigator.standalone === true;
+const isIOS = /iphone|ipad|ipod/i.test(navigator.userAgent) || (navigator.platform === 'MacIntel' && navigator.maxTouchPoints > 1);
+window.addEventListener('beforeinstallprompt', (e) => { e.preventDefault(); installEvt = e; if (!isInstalled()) $('btnInstall').hidden = false; });
+window.addEventListener('appinstalled', () => { installEvt = null; $('btnInstall').hidden = true; setStatus('✓ Rollcall installed. Open it from the CAIPSD icon.', 'ok', 4000); });
+if (isIOS && !isInstalled()) $('btnInstall').hidden = false;   // iPhone/iPad have no install prompt; the button shows how
+$('btnInstall').addEventListener('click', async () => {
+  if (installEvt) {
+    installEvt.prompt();
+    const { outcome } = await installEvt.userChoice.catch(() => ({ outcome: 'dismissed' }));
+    if (outcome === 'accepted') $('btnInstall').hidden = true;
+    installEvt = null;
+  } else if (isIOS) {
+    setStatus('To install: tap the Share button, then "Add to Home Screen".', 'wait', 7000);
+  } else {
+    setStatus('To install: open the browser menu (⋮) and choose "Install app".', 'wait', 7000);
+  }
+});
 
 // keep the screen on while Rollcall is open (re-acquired when the page comes back into view)
 let wakeLock = null;
