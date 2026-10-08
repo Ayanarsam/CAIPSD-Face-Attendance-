@@ -1,7 +1,7 @@
 /* CAIPSD Rollcall service worker: keeps the face models and engines on the device,
    so the app starts fast and still opens when the internet is down. */
 const CACHE = 'rollcall-assets-v1';
-const PAGE_CACHE = 'rollcall-page-v1';
+const PAGE_CACHE = 'rollcall-page-v2';
 
 // Versioned files that never change at the same URL: serve from the device first.
 const ASSET_HOSTS = ['cdn.jsdelivr.net', 'storage.googleapis.com', 'fonts.gstatic.com'];
@@ -45,7 +45,8 @@ async function deviceFirst(req, refresh) {
 // The page itself: get the latest version, but fall back to the saved copy if the network is slow or down.
 async function pageFirst(req) {
   const cache = await caches.open(PAGE_CACHE);
-  const net = fetch(req).then(res => { if (res.ok) cache.put(req, res.clone()); return res; });
+  const net = fetch(req.url, { cache: 'no-store', credentials: 'same-origin' }).then(   // always ask GitHub for the newest page, never the browser's old copy
+    res => { if (res.ok) cache.put(req, res.clone()); return res; });
   try {
     return await Promise.race([net, new Promise((_, rej) => setTimeout(() => rej(new Error('slow network')), 3000))]);
   } catch (err) {
