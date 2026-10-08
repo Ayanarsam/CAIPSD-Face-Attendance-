@@ -4,7 +4,13 @@
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
 <meta name="theme-color" content="#081A3E">
-<meta http-equiv="Content-Security-Policy" content="default-src 'none'; script-src 'sha256-NyLdRqUlwYSknJsA9Lf1jFUWsFwSQrBJ8k9NAnzDdzk=' https://cdn.jsdelivr.net/npm/face-api.js@0.22.2/ https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@0.10.14/ 'wasm-unsafe-eval'; style-src 'unsafe-inline' https://fonts.googleapis.com; font-src https://fonts.gstatic.com; img-src data: blob:; media-src 'self' blob:; connect-src https://cdn.jsdelivr.net/npm/@vladmandic/face-api@1.7.13/model/ https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@0.10.14/ https://storage.googleapis.com/mediapipe-models/face_landmarker/ https://script.google.com/macros/s/ https://script.googleusercontent.com data: blob:; worker-src 'self' blob: https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@0.10.14/; base-uri 'none'; form-action 'none'; object-src 'none'">
+<link rel="manifest" href="manifest.webmanifest">
+<link rel="apple-touch-icon" href="icon-192.png">
+<meta name="mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+<meta name="apple-mobile-web-app-title" content="Rollcall">
+<meta http-equiv="Content-Security-Policy" content="default-src 'none'; manifest-src 'self'; script-src 'sha256-0AytPVeAoZTG7T1mXl8bBKBzse6Va34xOdAfZUWqdnI=' https://cdn.jsdelivr.net/npm/face-api.js@0.22.2/ https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@0.10.14/ 'wasm-unsafe-eval'; style-src 'unsafe-inline' https://fonts.googleapis.com; font-src https://fonts.gstatic.com; img-src 'self' data: blob:; media-src 'self' blob:; connect-src https://cdn.jsdelivr.net/npm/@vladmandic/face-api@1.7.13/model/ https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@0.10.14/ https://storage.googleapis.com/mediapipe-models/face_landmarker/ https://script.google.com/macros/s/ https://script.googleusercontent.com data: blob:; worker-src 'self' blob: https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@0.10.14/; base-uri 'none'; form-action 'none'; object-src 'none'">
 <meta name="referrer" content="no-referrer">
 <meta name="robots" content="noindex, nofollow">
 <title>CAIPSD Attendance</title>
@@ -252,6 +258,7 @@
   tbody tr:last-child td { border-bottom: none; }
   td:nth-child(3), td:nth-child(4) { color: var(--ink-soft); white-space: nowrap; }
   .namecell { display: flex; align-items: center; gap: 10px; font-weight: 600; }
+  .chip-late { display: inline-block; padding: 3px 10px; border-radius: 999px; background: rgba(212,140,20,.14); color: #9A5B00; font-size: 12px; font-weight: 700; }
   .chip-ok { display: inline-block; padding: 3px 10px; border-radius: 999px; background: rgba(23,145,95,.12); color: var(--ok); font-size: 12px; font-weight: 700; }
   tr.new td { animation: rowIn .9s var(--ease); }
   @keyframes rowIn { from { background: rgba(43,212,154,.28); transform: translateY(-6px); opacity: 0; } 30% { opacity: 1; transform: none; } to { background: transparent; } }
@@ -517,6 +524,7 @@ const MATCH_MARGIN = 0.06;
 const BLINK_WINDOW_MS = 4000;        // a blink made while being identified still counts
 const PHOTO_WAIT_MS = 300;           // after a blink, wait for eyes to reopen before the check-in photo
 const SUCCESS_HOLD_MS = 1900;
+const LATE_AFTER = '09:15';   // check-ins after this time (24-hour clock) are marked Late; set to '' to turn off
 const VOICE_ON = true;   // set to false to turn off the spoken "Welcome, name"
 
 let mode = 'recognize';                 // 'recognize' | 'enroll'
@@ -555,7 +563,7 @@ function sanitizeEnrollments(list) {
 function sanitizeRecords(list) {
   if (!Array.isArray(list)) return [];
   return list.filter(r => r && typeof r.name === 'string' && Number.isFinite(r.ts))
-    .map(r => ({ name: clean(r.name, 60), section: clean(r.section, 20), date: clean(r.date, 40), time: clean(r.time, 40), ts: r.ts }))
+    .map(r => ({ name: clean(r.name, 60), section: clean(r.section, 20), date: clean(r.date, 40), time: clean(r.time, 40), ts: r.ts, late: r.late === true }))
     .filter(r => r.name);
 }
 function csvCell(v) { let s = String(v ?? ''); if (/^[=+\-@\t\r]/.test(s)) s = "'" + s; return '"' + s.replace(/"/g, '""') + '"'; }
@@ -1082,7 +1090,7 @@ function showSuccess(rec, photo) {
   const box = $('success'), ring = $('ring');
   $('sTitle').textContent = `Thank you, ${rec.name.split(' ')[0]}!`;
   const tm = new Date(rec.ts).toLocaleTimeString([], { hour: 'numeric', minute: '2-digit' });
-  $('sMeta').textContent = `Attendance marked at ${tm}` + (rec.section ? `, ${rec.section}` : '');
+  $('sMeta').textContent = `Attendance marked at ${tm}` + (rec.late ? ' (late)' : '') + (rec.section ? `, ${rec.section}` : '');
   const st = weekStats().rows.find(r => r.name === rec.name);
   $('sWeek').textContent = st && st.pct !== null ? `This week: ${st.count} of ${st.denom} day${st.denom === 1 ? '' : 's'}, ${st.pct}%` : '';
   const run = streaks().get(rec.name) || 0;
@@ -1260,14 +1268,18 @@ function capturePhoto() {
     return c.toDataURL('image/jpeg', 0.6);
   } catch (e) { return null; }
 }
+function isLate(d) {
+  const m = /^(\d{1,2}):(\d{2})$/.exec(LATE_AFTER || ''); if (!m) return false;
+  return d.getHours() * 60 + d.getMinutes() > (+m[1]) * 60 + (+m[2]);
+}
 function recordAttendance(name) {
   const now = new Date(), enr = enrollments.find(e => e.name === name);
   const photo = capturePhoto();
-  const rec = { name, section: enr ? enr.section : '', date: now.toLocaleDateString(), time: now.toLocaleTimeString(), ts: now.getTime() };
+  const rec = { name, section: enr ? enr.section : '', date: now.toLocaleDateString(), time: now.toLocaleTimeString(), ts: now.getTime(), late: isLate(now) };
   records.push(rec); highlightTs = rec.ts; renderLog(); persist();
   if (photo) putPhoto(rec.ts, photo);   // kept on-device and sent to the Sheet, not shown in the list
   if (syncEnabled()) {
-    const payload = { ...rec, token: SYNC_TOKEN }; if (photo) payload.image = photo;
+    const payload = { ...rec, status: rec.late ? 'Late' : 'On time', token: SYNC_TOKEN }; if (photo) payload.image = photo;
     queueSync(payload);
   }
   return { rec, photo };
@@ -1328,7 +1340,7 @@ function renderLog() {
   if (!records.length) { body.appendChild(h('tr', null, h('td', { colSpan: 5, class: 'empty-state' }, h('div', { class: 'empty-ico', text: '📋' }), h('div', { text: 'No attendance yet. Students appear here as soon as they blink to check in.' })))); return; }
   for (const r of records.slice().reverse().slice(0, 150)) {   // newest 150 rows on screen; CSV export has everything
     const av = h('div', { class: 'avatar', text: (r.name || '?').charAt(0).toUpperCase() });
-    const row = h('tr', null, h('td', null, h('div', { class: 'namecell' }, av, h('span', { text: r.name }))), h('td', { text: r.section || '' }), h('td', { text: r.date }), h('td', { text: r.time }), h('td', null, h('span', { class: 'chip-ok', text: 'Present' })));
+    const row = h('tr', null, h('td', null, h('div', { class: 'namecell' }, av, h('span', { text: r.name }))), h('td', { text: r.section || '' }), h('td', { text: r.date }), h('td', { text: r.time }), h('td', null, r.late ? h('span', { class: 'chip-late', text: 'Late' }) : h('span', { class: 'chip-ok', text: 'Present' })));
     if (r.ts === highlightTs) row.className = 'new';
     body.appendChild(row);
   }
@@ -1339,8 +1351,8 @@ async function clearRecords() {
   records = []; presentCache.key = ''; streakCache.key = ''; renderLog(); await Promise.all([persist(), clearPhotos()]);
 }
 function exportCSV() {
-  let csv = 'Name,Section,Date,Time\n';
-  records.forEach(r => { csv += [r.name, r.section, r.date, r.time].map(csvCell).join(',') + '\n'; });
+  let csv = 'Name,Section,Date,Time,Status\n';
+  records.forEach(r => { csv += [r.name, r.section, r.date, r.time, r.late ? 'Late' : 'On time'].map(csvCell).join(',') + '\n'; });
   const url = URL.createObjectURL(new Blob([csv], { type: 'text/csv' }));
   const a = document.createElement('a'); a.href = url; a.download = 'attendance_' + new Date().toISOString().slice(0, 10) + '.csv'; a.click();
   setTimeout(() => URL.revokeObjectURL(url), 5000);
@@ -1443,6 +1455,16 @@ document.addEventListener('keydown', e => {
   const k = (e.key || '').toLowerCase(), mod = e.ctrlKey || e.metaKey;
   if (k === 'f12' || (mod && e.shiftKey && (k === 'i' || k === 'j' || k === 'c')) || (mod && (k === 'u' || k === 's'))) { e.preventDefault(); e.stopPropagation(); }
 }, true);
+
+// keep the screen on while Rollcall is open (re-acquired when the page comes back into view)
+let wakeLock = null;
+async function keepAwake() {
+  if (!('wakeLock' in navigator) || document.hidden || wakeLock) return;
+  try { wakeLock = await navigator.wakeLock.request('screen'); wakeLock.addEventListener('release', () => { wakeLock = null; }); } catch (e) {}
+}
+document.addEventListener('visibilitychange', keepAwake);
+document.addEventListener('pointerdown', keepAwake, { passive: true });
+keepAwake();
 
 // keep models and engines on this device after the first visit (faster start, opens offline)
 if ('serviceWorker' in navigator && location.protocol === 'https:') window.addEventListener('load', () => navigator.serviceWorker.register('sw.js').catch(e => console.warn('Offline cache unavailable', e)));
