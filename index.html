@@ -10,7 +10,7 @@
 <meta name="apple-mobile-web-app-capable" content="yes">
 <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
 <meta name="apple-mobile-web-app-title" content="CAIPSD Attendance">
-<meta http-equiv="Content-Security-Policy" content="default-src 'none'; manifest-src 'self'; script-src 'sha256-xNqKZsH5Dog6nNRoFZjNyWsoV9s1jfLarCi+VuCTjZo=' https://cdn.jsdelivr.net/npm/face-api.js@0.22.2/ https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@0.10.14/ 'wasm-unsafe-eval'; style-src 'unsafe-inline' https://fonts.googleapis.com; font-src https://fonts.gstatic.com; img-src 'self' data: blob:; media-src 'self' blob:; connect-src https://cdn.jsdelivr.net/npm/@vladmandic/face-api@1.7.13/model/ https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@0.10.14/ https://storage.googleapis.com/mediapipe-models/face_landmarker/ https://script.google.com/macros/s/ https://script.googleusercontent.com data: blob:; worker-src 'self' blob: https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@0.10.14/; base-uri 'none'; form-action 'none'; object-src 'none'">
+<meta http-equiv="Content-Security-Policy" content="default-src 'none'; manifest-src 'self'; script-src 'sha256-HGqMiW6/8Niallzq7SlilLwMTqKbzsZJW80G95+t8nk=' https://cdn.jsdelivr.net/npm/face-api.js@0.22.2/ https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@0.10.14/ 'wasm-unsafe-eval'; style-src 'unsafe-inline' https://fonts.googleapis.com; font-src https://fonts.gstatic.com; img-src 'self' data: blob:; media-src 'self' blob:; connect-src https://cdn.jsdelivr.net/npm/@vladmandic/face-api@1.7.13/model/ https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@0.10.14/ https://storage.googleapis.com/mediapipe-models/face_landmarker/ https://script.google.com/macros/s/ https://script.googleusercontent.com data: blob:; worker-src 'self' blob: https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@0.10.14/; base-uri 'none'; form-action 'none'; object-src 'none'">
 <meta name="referrer" content="no-referrer">
 <meta name="robots" content="noindex, nofollow">
 <title>CAIPSD Attendance</title>
@@ -1081,15 +1081,16 @@ function chooseVoice() {
   if (!('speechSynthesis' in window)) return null;
   const vs = speechSynthesis.getVoices().filter(v => /^en/i.test(v.lang)); if (!vs.length) return null;
   const female = vs.filter(v => FEMALE_VOICES.test(v.name) && !/\bmale\b/i.test(v.name.replace(/female/i, '')));
-  const rank = v => (/en-IN/i.test(v.lang) ? 0 : /en-GB/i.test(v.lang) ? 1 : 2) + (/online|natural|neural/i.test(v.name) ? -0.5 : 0);   // natural voices first
+  // voices built into the device speak instantly; online ones wait for the internet first
+  const rank = v => (v.localService === false || /online/i.test(v.name) ? 10 : 0) + (/en-IN/i.test(v.lang) ? 0 : /en-GB/i.test(v.lang) ? 1 : 2);
   if (female.length) return female.sort((a, b) => rank(a) - rank(b))[0];
   return vs.filter(v => !MALE_VOICES.test(v.name)).sort((a, b) => rank(a) - rank(b))[0] || null;   // unnamed default voices are usually female
 }
-if ('speechSynthesis' in window) speechSynthesis.onvoiceschanged = () => { voicePick = chooseVoice(); };
+if ('speechSynthesis' in window) { speechSynthesis.onvoiceschanged = () => { voicePick = chooseVoice(); }; voicePick = chooseVoice(); }
 function sayWelcome(name) {
   if (!VOICE_ON || !('speechSynthesis' in window)) return;
   try {
-    speechSynthesis.cancel();   // never queue up behind the previous person
+    if (speechSynthesis.speaking || speechSynthesis.pending) speechSynthesis.cancel();   // never queue up behind the previous person
     const u = new SpeechSynthesisUtterance(`Welcome, ${name}`);
     voicePick = voicePick || chooseVoice(); if (voicePick) { u.voice = voicePick; u.lang = voicePick.lang; }
     u.rate = 1.05; u.pitch = voicePick && FEMALE_VOICES.test(voicePick.name) ? 1.05 : 1.3; u.volume = 1;   // raise pitch if no female voice is installed
@@ -1107,6 +1108,7 @@ function chime() {
   });
 }
 function showSuccess(rec, photo) {
+  sayWelcome(rec.name.split(' ')[0]);   // first, so the voice starts together with the pop-up
   const box = $('success'), ring = $('ring');
   $('sTitle').textContent = `Thank you, ${rec.name.split(' ')[0]}!`;
   const tm = new Date(rec.ts).toLocaleTimeString([], { hour: 'numeric', minute: '2-digit' });
@@ -1121,7 +1123,6 @@ function showSuccess(rec, photo) {
   successTimer = setTimeout(() => { box.classList.remove('show'); ring.classList.remove('flash', 'success-on'); }, SUCCESS_HOLD_MS);
   if (navigator.vibrate) navigator.vibrate([60, 40, 90]);
   chime();
-  setTimeout(() => sayWelcome(rec.name.split(' ')[0]), 350);   // after the chime
 }
 
 /* ---------- attendance streaks (consecutive weekdays present; weekends are skipped) ---------- */
