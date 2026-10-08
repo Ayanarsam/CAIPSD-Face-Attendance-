@@ -4,7 +4,7 @@
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
 <meta name="theme-color" content="#081A3E">
-<meta http-equiv="Content-Security-Policy" content="default-src 'none'; script-src 'sha256-PPmtAPDi6E3jEMBIsp2bln48x/SGy2iqjq/C2DgvyYw=' https://cdn.jsdelivr.net/npm/face-api.js@0.22.2/ https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@0.10.14/ 'wasm-unsafe-eval'; style-src 'unsafe-inline' https://fonts.googleapis.com; font-src https://fonts.gstatic.com; img-src data: blob:; media-src 'self' blob:; connect-src https://cdn.jsdelivr.net/npm/@vladmandic/face-api@1.7.13/model/ https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@0.10.14/ https://storage.googleapis.com/mediapipe-models/face_landmarker/ https://script.google.com/macros/s/ https://script.googleusercontent.com data: blob:; worker-src blob: https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@0.10.14/; base-uri 'none'; form-action 'none'; object-src 'none'">
+<meta http-equiv="Content-Security-Policy" content="default-src 'none'; script-src 'sha256-VHr77IW8+aD1kmdcTCjmfzpJovsGlr9iRblNfFmZ73E=' https://cdn.jsdelivr.net/npm/face-api.js@0.22.2/ https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@0.10.14/ 'wasm-unsafe-eval'; style-src 'unsafe-inline' https://fonts.googleapis.com; font-src https://fonts.gstatic.com; img-src data: blob:; media-src 'self' blob:; connect-src https://cdn.jsdelivr.net/npm/@vladmandic/face-api@1.7.13/model/ https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@0.10.14/ https://storage.googleapis.com/mediapipe-models/face_landmarker/ https://script.google.com/macros/s/ https://script.googleusercontent.com data: blob:; worker-src blob: https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@0.10.14/; base-uri 'none'; form-action 'none'; object-src 'none'">
 <meta name="referrer" content="no-referrer">
 <meta name="robots" content="noindex, nofollow">
 <title>CAIPSD Attendance</title>
@@ -242,6 +242,7 @@
   .count { padding: 4px 11px; border-radius: 999px; background: rgba(255,255,255,.65); border: 1px solid rgba(255,255,255,.85); color: var(--brand); font-size: 12px; font-weight: 700; }
   .count.today-pill { background: rgba(226,248,238,.8); border-color: rgba(23,145,95,.2); color: var(--ok); }
   .count.bump { animation: bump .5s var(--spring); }
+  .count.sync-pill { background: rgba(255,243,205,.9); border-color: rgba(201,162,39,.35); color: #8A6100; }
   @keyframes bump { 40% { transform: scale(1.18); } }
   .logs-actions { margin-left: auto; display: flex; gap: 8px; }
   .table-wrap { max-height: 600px; overflow: auto; border-radius: 18px; background: rgba(255,255,255,.45); border: 1px solid rgba(255,255,255,.75); -webkit-overflow-scrolling: touch; }
@@ -470,6 +471,7 @@
         <h2>Attendance log</h2>
         <span class="count today-pill" id="todayPill">0 today</span>
         <span class="count" id="countPill">0 records</span>
+        <span class="count sync-pill" id="syncPill" hidden></span>
         <div class="logs-actions">
           <button class="btn btn-ghost btn-sm" id="btnExport">Export CSV</button>
           <button class="btn btn-danger btn-sm" id="btnClear">Clear all</button>
@@ -515,6 +517,7 @@ const MATCH_MARGIN = 0.06;
 const BLINK_WINDOW_MS = 4000;        // a blink made while being identified still counts
 const PHOTO_WAIT_MS = 300;           // after a blink, wait for eyes to reopen before the check-in photo
 const SUCCESS_HOLD_MS = 1900;
+const VOICE_ON = true;   // set to false to turn off the spoken "Welcome, name"
 
 let mode = 'recognize';                 // 'recognize' | 'enroll'
 let enrollments = [];                   // [{id, name, section, descriptor: Float32Array}]
@@ -580,8 +583,8 @@ function fromB64(s) { const bin = atob(s), out = new Uint8Array(bin.length); for
 let dbP = null;
 function openDB() {
   return dbP || (dbP = new Promise((res, rej) => {
-    const r = indexedDB.open('caipsd', 2);
-    r.onupgradeneeded = () => { const d = r.result; if (!d.objectStoreNames.contains('k')) d.createObjectStore('k'); if (!d.objectStoreNames.contains('photos')) d.createObjectStore('photos'); };
+    const r = indexedDB.open('caipsd', 3);
+    r.onupgradeneeded = () => { const d = r.result; if (!d.objectStoreNames.contains('k')) d.createObjectStore('k'); if (!d.objectStoreNames.contains('photos')) d.createObjectStore('photos'); if (!d.objectStoreNames.contains('outbox')) d.createObjectStore('outbox'); };
     r.onsuccess = () => res(r.result); r.onerror = () => rej(r.error);
   }));
 }
@@ -1037,7 +1040,34 @@ function drawFace(tr, D, outline, now) {
 
 /* ---------- success feedback ---------- */
 let successTimer = 0, audioCtx = null;
-function unlockAudio() { try { if (!audioCtx) audioCtx = new (window.AudioContext || window.webkitAudioContext)(); if (audioCtx.state === 'suspended') audioCtx.resume(); } catch (e) {} }
+let voicePrimed = false, voicePick = null;
+function unlockAudio() {
+  try { if (!audioCtx) audioCtx = new (window.AudioContext || window.webkitAudioContext)(); if (audioCtx.state === 'suspended') audioCtx.resume(); } catch (e) {}
+  // browsers only allow speech after a first tap; a silent utterance unlocks it
+  if (!voicePrimed && 'speechSynthesis' in window) { try { const u = new SpeechSynthesisUtterance(' '); u.volume = 0; speechSynthesis.speak(u); voicePrimed = true; } catch (e) {} }
+}
+// Woman's voice: known female voice names across Windows, Edge, Chrome, Android, macOS and iOS
+const FEMALE_VOICES = /neerja|heera|veena|kajal|swara|aditi|raveena|zira|aria|jenny|sonia|libby|natasha|hazel|susan|catherine|linda|female|samantha|karen|moira|tessa|fiona|serena|kate|victoria|allison|ava|susan|zoe|isha|priya/i;
+const MALE_VOICES = /\bmale\b|david|mark|ravi|prabhat|rishi|daniel|alex|fred|george|guy|ryan|thomas|oliver|arthur|aaron|tom\b/i;
+function chooseVoice() {
+  if (!('speechSynthesis' in window)) return null;
+  const vs = speechSynthesis.getVoices().filter(v => /^en/i.test(v.lang)); if (!vs.length) return null;
+  const female = vs.filter(v => FEMALE_VOICES.test(v.name) && !/\bmale\b/i.test(v.name.replace(/female/i, '')));
+  const rank = v => (/en-IN/i.test(v.lang) ? 0 : /en-GB/i.test(v.lang) ? 1 : 2) + (/online|natural|neural/i.test(v.name) ? -0.5 : 0);   // natural voices first
+  if (female.length) return female.sort((a, b) => rank(a) - rank(b))[0];
+  return vs.filter(v => !MALE_VOICES.test(v.name)).sort((a, b) => rank(a) - rank(b))[0] || null;   // unnamed default voices are usually female
+}
+if ('speechSynthesis' in window) speechSynthesis.onvoiceschanged = () => { voicePick = chooseVoice(); };
+function sayWelcome(name) {
+  if (!VOICE_ON || !('speechSynthesis' in window)) return;
+  try {
+    speechSynthesis.cancel();   // never queue up behind the previous person
+    const u = new SpeechSynthesisUtterance(`Welcome, ${name}`);
+    voicePick = voicePick || chooseVoice(); if (voicePick) { u.voice = voicePick; u.lang = voicePick.lang; }
+    u.rate = 1.05; u.pitch = voicePick && FEMALE_VOICES.test(voicePick.name) ? 1.05 : 1.3; u.volume = 1;   // raise pitch if no female voice is installed
+    speechSynthesis.speak(u);
+  } catch (e) {}
+}
 function chime() {
   if (!audioCtx || audioCtx.state !== 'running') return;
   const t0 = audioCtx.currentTime;
@@ -1063,6 +1093,7 @@ function showSuccess(rec, photo) {
   successTimer = setTimeout(() => { box.classList.remove('show'); ring.classList.remove('flash', 'success-on'); }, SUCCESS_HOLD_MS);
   if (navigator.vibrate) navigator.vibrate([60, 40, 90]);
   chime();
+  setTimeout(() => sayWelcome(rec.name.split(' ')[0]), 350);   // after the chime
 }
 
 /* ---------- attendance streaks (consecutive weekdays present; weekends are skipped) ---------- */
@@ -1235,12 +1266,53 @@ function recordAttendance(name) {
   const rec = { name, section: enr ? enr.section : '', date: now.toLocaleDateString(), time: now.toLocaleTimeString(), ts: now.getTime() };
   records.push(rec); highlightTs = rec.ts; renderLog(); persist();
   if (photo) putPhoto(rec.ts, photo);   // kept on-device and sent to the Sheet, not shown in the list
-  if (GOOGLE_SHEET_WEB_APP_URL.startsWith('https://script.google.com/macros/s/')) {
+  if (syncEnabled()) {
     const payload = { ...rec, token: SYNC_TOKEN }; if (photo) payload.image = photo;
-    const ac = new AbortController(); setTimeout(() => ac.abort(), 20000);
-    fetch(GOOGLE_SHEET_WEB_APP_URL, { method: 'POST', mode: 'no-cors', headers: { 'Content-Type': 'text/plain' }, body: JSON.stringify(payload), referrerPolicy: 'no-referrer', credentials: 'omit', signal: ac.signal }).catch(err => console.error('Sync error:', err));
+    queueSync(payload);
   }
   return { rec, photo };
+}
+
+/* ---------- offline sync: every check-in waits in an encrypted outbox until the Sheet receives it ---------- */
+let outboxCount = 0, flushing = false, outboxReady = false;   // ready once the device key has loaded
+function syncEnabled() { return GOOGLE_SHEET_WEB_APP_URL.startsWith('https://script.google.com/macros/s/'); }
+function outboxTx(mode, fn) {
+  return openDB().then(db => new Promise((res, rej) => { const tx = db.transaction('outbox', mode); const out = fn(tx.objectStore('outbox')); tx.oncomplete = () => res(out && out.result); tx.onerror = () => rej(tx.error); }));
+}
+async function refreshSyncPill() {
+  try { outboxCount = await outboxTx('readonly', s => s.count()) || 0; } catch (e) {}
+  const pill = $('syncPill'); if (!pill) return;
+  pill.hidden = outboxCount === 0;
+  pill.textContent = navigator.onLine ? `Syncing ${outboxCount}…` : `Offline · ${outboxCount} saved`;
+  pill.title = `${outboxCount} check-in${outboxCount === 1 ? '' : 's'} saved on this device, sent automatically when the internet is back`;
+}
+async function queueSync(payload) {
+  try { const sealed = await seal(payload); await outboxTx('readwrite', s => s.put(sealed, payload.ts)); }
+  catch (e) { console.warn('Outbox save failed, sending directly', e); sendToSheet(payload).catch(() => {}); return; }
+  refreshSyncPill(); flushOutbox();
+}
+function sendToSheet(payload) {
+  const ac = new AbortController(), t = setTimeout(() => ac.abort(), 20000);
+  return fetch(GOOGLE_SHEET_WEB_APP_URL, { method: 'POST', mode: 'no-cors', headers: { 'Content-Type': 'text/plain' }, body: JSON.stringify(payload), referrerPolicy: 'no-referrer', credentials: 'omit', signal: ac.signal })
+    .finally(() => clearTimeout(t));
+}
+async function flushOutbox() {
+  if (!outboxReady) return;
+  if (flushing || !syncEnabled() || !navigator.onLine) { refreshSyncPill(); return; }
+  flushing = true;
+  try {
+    const keys = await outboxTx('readonly', s => s.getAllKeys()) || [];
+    for (const k of keys) {
+      let payload = null;
+      try { payload = await unseal(await outboxTx('readonly', s => s.get(k))); } catch (e) {}
+      if (!payload) { await outboxTx('readwrite', s => s.delete(k)); continue; }   // unreadable entry, drop it
+      try { await sendToSheet(payload); }          // resolves once the request reaches Google
+      catch (e) { console.warn('Still offline, will retry', e); break; }
+      await outboxTx('readwrite', s => s.delete(k));
+      refreshSyncPill();
+    }
+  } catch (e) { console.error('Outbox flush failed', e); }
+  flushing = false; refreshSyncPill();
 }
 let lastCounts = '';
 function renderLog() {
@@ -1341,6 +1413,7 @@ async function init() {
   if (window.ResizeObserver) new ResizeObserver(sizeOverlay).observe($('ring')); else window.addEventListener('resize', sizeOverlay);
   $('splash').classList.add('out'); setTimeout(() => { $('splash').remove(); app.classList.remove('enter'); }, 700);
   unlockAudio();
+  outboxReady = true; flushOutbox();   // send anything saved while the device was offline
   faLoop(); requestAnimationFrame(render);
   perfFrom = performance.now() + 6000;   // ignore start-up warm-up when judging speed
   camP.then(() => loadMediapipe());   // fast blink engine; face-api covers blinks until it arrives
@@ -1359,6 +1432,9 @@ $('btnClear').addEventListener('click', clearRecords);
 $('btnExportWeek').addEventListener('click', exportWeekCSV);
 setInterval(() => { if (records && weekInfo().key !== lastWeekKey) renderLog(); }, 60000);   // rolls over at midnight and every Monday
 document.addEventListener('pointerdown', unlockAudio, { passive: true });
+window.addEventListener('online', flushOutbox);
+window.addEventListener('offline', refreshSyncPill);
+setInterval(flushOutbox, 60000);   // retry every minute in case the 'online' event is missed
 document.addEventListener('visibilitychange', () => { if (!document.hidden && mediaStream && !mediaStream.active) startCamera(); });
 
 // Extra deterrent on computers without the kiosk policy (the browser policy is the real lock).
