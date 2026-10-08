@@ -10,7 +10,7 @@
 <meta name="apple-mobile-web-app-capable" content="yes">
 <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
 <meta name="apple-mobile-web-app-title" content="Rollcall">
-<meta http-equiv="Content-Security-Policy" content="default-src 'none'; manifest-src 'self'; script-src 'sha256-0AytPVeAoZTG7T1mXl8bBKBzse6Va34xOdAfZUWqdnI=' https://cdn.jsdelivr.net/npm/face-api.js@0.22.2/ https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@0.10.14/ 'wasm-unsafe-eval'; style-src 'unsafe-inline' https://fonts.googleapis.com; font-src https://fonts.gstatic.com; img-src 'self' data: blob:; media-src 'self' blob:; connect-src https://cdn.jsdelivr.net/npm/@vladmandic/face-api@1.7.13/model/ https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@0.10.14/ https://storage.googleapis.com/mediapipe-models/face_landmarker/ https://script.google.com/macros/s/ https://script.googleusercontent.com data: blob:; worker-src 'self' blob: https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@0.10.14/; base-uri 'none'; form-action 'none'; object-src 'none'">
+<meta http-equiv="Content-Security-Policy" content="default-src 'none'; manifest-src 'self'; script-src 'sha256-OSvNl66ETbUJmKyUwUID+X+zqMbfrNNd76ry1J3Z378=' https://cdn.jsdelivr.net/npm/face-api.js@0.22.2/ https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@0.10.14/ 'wasm-unsafe-eval'; style-src 'unsafe-inline' https://fonts.googleapis.com; font-src https://fonts.gstatic.com; img-src 'self' data: blob:; media-src 'self' blob:; connect-src https://cdn.jsdelivr.net/npm/@vladmandic/face-api@1.7.13/model/ https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@0.10.14/ https://storage.googleapis.com/mediapipe-models/face_landmarker/ https://script.google.com/macros/s/ https://script.googleusercontent.com data: blob:; worker-src 'self' blob: https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@0.10.14/; base-uri 'none'; form-action 'none'; object-src 'none'">
 <meta name="referrer" content="no-referrer">
 <meta name="robots" content="noindex, nofollow">
 <title>CAIPSD Attendance</title>
@@ -316,6 +316,7 @@
   /* Lite mode: turned on automatically when the computer is too slow for the glass blur */
   body.lite .glass { -webkit-backdrop-filter: none; backdrop-filter: none; background: linear-gradient(145deg, rgba(255,255,255,.96), rgba(246,249,255,.92)); }
   body.lite .glass::before, body.lite .bg i { display: none; }
+  body.lite .frame-ring, body.lite .guide::before, body.lite .live::before, body.lite .dot.t, body.lite .steps span.on::before, body.lite .status-wait::before { animation: none !important; }
 
   /* Tablet */
   @media (max-width: 980px) {
@@ -736,7 +737,7 @@ let hadFace = false;
 async function faLoop() {
   if (engine !== 'faceapi') return;
   try { await faFrame(); } catch (e) { console.warn(e); }
-  setTimeout(faLoop, hadFace ? 0 : 100);
+  setTimeout(faLoop, hadFace ? (isLite() ? 30 : 0) : 150);
 }
 async function faFrame() {
   if (document.hidden || !video || video.readyState < 2 || !video.videoWidth) { hadFace = false; return; }
@@ -759,7 +760,7 @@ async function faFrame() {
 
 /* Engine B (preferred): MediaPipe face mesh + blink blendshapes on every video frame (~30 fps).
    Identity runs asynchronously alongside it, so blinks are never missed. */
-let lastVideoTime = -1;
+let lastVideoTime = -1, lastFaceAt = 0;
 let detCost = 15;
 function mpLoop() {
   if (engine !== 'mp') return;
@@ -768,7 +769,8 @@ function mpLoop() {
   const cost = performance.now() - t0;
   detCost = detCost * 0.9 + cost * 0.1;
   // about 30 detections a second, leaving gaps so the overlay can be drawn smoothly in between
-  setTimeout(mpLoop, document.hidden ? 250 : Math.max(4, 33 - cost));
+  const idle = !hadFace && performance.now() - lastFaceAt > 1500;   // nobody there: check ~6 times a second instead of 30
+  setTimeout(mpLoop, document.hidden ? 250 : idle ? 160 : Math.max(4, (isLite() ? 45 : 33) - cost));
 }
 function mpStep() {
   if (document.hidden || !video || video.readyState < 2 || !video.videoWidth || video.currentTime === lastVideoTime) return;
@@ -783,7 +785,7 @@ function mpStep() {
     const lp = pts(MP_EYE_IMG_LEFT), rp = pts(MP_EYE_IMG_RIGHT), oval = pts(MP_FACE_OVAL);
     faces.push({ ob: faceBox(oval, lp, rp, 0, 0.04), lp, rp, outline: oval, closed: true, sL: sc('eyeBlinkRight'), sR: sc('eyeBlinkLeft'), src: 'mp' });
   }
-  hadFace = faces.length > 0;
+  hadFace = faces.length > 0; if (hadFace) lastFaceAt = performance.now();
   updateTracks(faces, performance.now());
   if (recogReady && !idBusy && needsIdentity(performance.now())) runIdentity();
 }
@@ -792,13 +794,17 @@ function needsIdentity(t) {
   if (mode === 'enroll') return tracks.length > 0 && t - lastEnrollIdAt > 250;
   return tracks.some(tr => t - tr.lastSeen < 300 && (tr.name === null || (tr.name === 'Unknown' && t - tr.lastIdAt > ID_RETRY_MS) || t - tr.lastIdAt > ID_REVERIFY_MS));
 }
+let idCost = 120, idNextAt = 0;
 async function runIdentity() {
-  idBusy = true;
+  if (performance.now() < idNextAt) return;
+  idBusy = true; const t0 = performance.now();
   try {
     const opts = new faceapi.TinyFaceDetectorOptions({ inputSize: ID_INPUT_SIZE, scoreThreshold: 0.45 });
     const dets = await faceapi.detectAllFaces(video, opts).withFaceLandmarks().withFaceDescriptors();
     applyIdentity(dets, performance.now());
   } catch (e) { console.warn('Identity pass failed', e); }
+  idCost = idCost * 0.7 + (performance.now() - t0) * 0.3;
+  idNextAt = performance.now() + Math.min(600, idCost * 0.8);   // let the blink engine breathe between identity passes
   idBusy = false;
 }
 function applyIdentity(dets, t) {
@@ -921,7 +927,7 @@ function rr(x, y, w, hh, r) {
   ctx.arcTo(x, y + hh, x, y, r); ctx.arcTo(x, y, x + w, y, r); ctx.closePath();
 }
 function sizeOverlay() {
-  const r = overlay.getBoundingClientRect(), dpr = Math.min(window.devicePixelRatio || 1, 1.5);
+  const r = overlay.getBoundingClientRect(), dpr = Math.min(window.devicePixelRatio || 1, document.body.classList.contains('lite') ? 1 : 1.5);
   view = { cw: r.width, ch: r.height, dpr };
   overlay.width = Math.max(1, Math.round(r.width * dpr)); overlay.height = Math.max(1, Math.round(r.height * dpr));
 }
@@ -942,14 +948,19 @@ function setFrameState(st, has) {
 }
 
 let lastFrameT = 0, drewLast = false, frameEma = 16, slowFrames = 0, perfFrom = Infinity;
+// weaker computers and phones start in lite mode straight away (no glass blur over the live video)
+const WEAK_DEVICE = (navigator.hardwareConcurrency || 8) <= 4 || (navigator.deviceMemory || 8) <= 4;
+if (WEAK_DEVICE) document.body.classList.add('lite');
+const isLite = () => document.body.classList.contains('lite');
 function render(ts) {
   requestAnimationFrame(render);
+  if (isLite() && ts - lastFrameT < 30) return;   // lite: about 30 fps is plenty for the boxes
   const dt = Math.min(64, ts - (lastFrameT || ts)); lastFrameT = ts;
   // if this computer can't keep up, switch off the heavy glass blur automatically
   if (ts > perfFrom && !document.hidden) {
     frameEma = frameEma * 0.95 + dt * 0.05;
-    if ((frameEma > 24 || detCost > 30) && ++slowFrames > 120) { document.body.classList.add('lite'); perfFrom = Infinity; }
-    else if (frameEma <= 24 && detCost <= 30) slowFrames = 0;
+    if ((frameEma > 21 || detCost > 26) && ++slowFrames > 45) { document.body.classList.add('lite'); sizeOverlay(); perfFrom = Infinity; }
+    else if (frameEma <= 21 && detCost <= 26) slowFrames = 0;
   }
   const m = video && mapper();
   if (!m || !tracks.length || document.hidden) {
@@ -1268,6 +1279,7 @@ function capturePhoto() {
     return c.toDataURL('image/jpeg', 0.6);
   } catch (e) { return null; }
 }
+const later = (fn) => setTimeout(() => (window.requestIdleCallback ? requestIdleCallback(fn, { timeout: 700 }) : fn()), 350);
 function isLate(d) {
   const m = /^(\d{1,2}):(\d{2})$/.exec(LATE_AFTER || ''); if (!m) return false;
   return d.getHours() * 60 + d.getMinutes() > (+m[1]) * 60 + (+m[2]);
@@ -1276,8 +1288,8 @@ function recordAttendance(name) {
   const now = new Date(), enr = enrollments.find(e => e.name === name);
   const photo = capturePhoto();
   const rec = { name, section: enr ? enr.section : '', date: now.toLocaleDateString(), time: now.toLocaleTimeString(), ts: now.getTime(), late: isLate(now) };
-  records.push(rec); highlightTs = rec.ts; renderLog(); persist();
-  if (photo) putPhoto(rec.ts, photo);   // kept on-device and sent to the Sheet, not shown in the list
+  records.push(rec); highlightTs = rec.ts; presentCache.key = '';
+  later(() => { renderLog(); persist(); if (photo) putPhoto(rec.ts, photo); });   // after the thank-you animation starts   // kept on-device and sent to the Sheet, not shown in the list
   if (syncEnabled()) {
     const payload = { ...rec, status: rec.late ? 'Late' : 'On time', token: SYNC_TOKEN }; if (photo) payload.image = photo;
     queueSync(payload);
