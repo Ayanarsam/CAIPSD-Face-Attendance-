@@ -1,6 +1,6 @@
 {
   "name": "CAIPSD Attendance",
-  "short_name": "Rollcall",
+  "short_name": "CAIPSD Attendance",
   "description": "Face and blink attendance for the Centre of AI & Professional Skills Development, IUB",
   "id": "./",
   "start_url": "./",
