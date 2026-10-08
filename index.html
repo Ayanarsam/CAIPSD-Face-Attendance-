@@ -4,7 +4,7 @@
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
 <meta name="theme-color" content="#081A3E">
-<meta http-equiv="Content-Security-Policy" content="default-src 'none'; script-src 'sha256-VHr77IW8+aD1kmdcTCjmfzpJovsGlr9iRblNfFmZ73E=' https://cdn.jsdelivr.net/npm/face-api.js@0.22.2/ https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@0.10.14/ 'wasm-unsafe-eval'; style-src 'unsafe-inline' https://fonts.googleapis.com; font-src https://fonts.gstatic.com; img-src data: blob:; media-src 'self' blob:; connect-src https://cdn.jsdelivr.net/npm/@vladmandic/face-api@1.7.13/model/ https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@0.10.14/ https://storage.googleapis.com/mediapipe-models/face_landmarker/ https://script.google.com/macros/s/ https://script.googleusercontent.com data: blob:; worker-src blob: https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@0.10.14/; base-uri 'none'; form-action 'none'; object-src 'none'">
+<meta http-equiv="Content-Security-Policy" content="default-src 'none'; script-src 'sha256-NyLdRqUlwYSknJsA9Lf1jFUWsFwSQrBJ8k9NAnzDdzk=' https://cdn.jsdelivr.net/npm/face-api.js@0.22.2/ https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@0.10.14/ 'wasm-unsafe-eval'; style-src 'unsafe-inline' https://fonts.googleapis.com; font-src https://fonts.gstatic.com; img-src data: blob:; media-src 'self' blob:; connect-src https://cdn.jsdelivr.net/npm/@vladmandic/face-api@1.7.13/model/ https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@0.10.14/ https://storage.googleapis.com/mediapipe-models/face_landmarker/ https://script.google.com/macros/s/ https://script.googleusercontent.com data: blob:; worker-src 'self' blob: https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@0.10.14/; base-uri 'none'; form-action 'none'; object-src 'none'">
 <meta name="referrer" content="no-referrer">
 <meta name="robots" content="noindex, nofollow">
 <title>CAIPSD Attendance</title>
@@ -1388,6 +1388,11 @@ async function init() {
   setProgress(22, 'Loading face engine…');
   await libP;
   try { await faceapi.tf.setBackend('webgl'); await faceapi.tf.ready(); } catch (e) { console.warn('WebGL unavailable', e); }
+  // The recognition model (~6 MB) starts downloading right away, in parallel with the small ones, and is warmed up before use.
+  const recogP = faceapi.nets.faceRecognitionNet.loadFromUri(MODEL_URL)
+    .then(warmDescriptor)
+    .then(() => { recogReady = true; tracks.forEach(t => { t.name = null; }); })
+    .catch(err => { console.error('Recognition model failed', err); recogFailed = true; });
   setProgress(42, 'Loading face models…');
   let loaded = 0;
   const tick = () => setProgress(42 + (++loaded) * 20, 'Loading face models…');
@@ -1396,11 +1401,6 @@ async function init() {
     faceapi.nets.tinyFaceDetector.loadFromUri(MODEL_URL).then(tick),
     faceapi.nets.faceLandmark68Net.loadFromUri(MODEL_URL).then(tick)
   ]);
-  // The recognition model (~6 MB) downloads in the background and is warmed up before use.
-  const recogP = faceapi.nets.faceRecognitionNet.loadFromUri(MODEL_URL)
-    .then(warmDescriptor)
-    .then(() => { recogReady = true; tracks.forEach(t => { t.name = null; }); })
-    .catch(err => { console.error('Recognition model failed', err); recogFailed = true; });
   setProgress(90, 'Warming up…');
   await Promise.all([dataP, Promise.race([warmDetector(), timeout(1500)])]);
   setProgress(100, 'Ready');
@@ -1443,6 +1443,9 @@ document.addEventListener('keydown', e => {
   const k = (e.key || '').toLowerCase(), mod = e.ctrlKey || e.metaKey;
   if (k === 'f12' || (mod && e.shiftKey && (k === 'i' || k === 'j' || k === 'c')) || (mod && (k === 'u' || k === 's'))) { e.preventDefault(); e.stopPropagation(); }
 }, true);
+
+// keep models and engines on this device after the first visit (faster start, opens offline)
+if ('serviceWorker' in navigator && location.protocol === 'https:') window.addEventListener('load', () => navigator.serviceWorker.register('sw.js').catch(e => console.warn('Offline cache unavailable', e)));
 
 init().catch(err => { console.error(err); $('splashStatus').textContent = 'Failed to load: ' + err.message; });
 })();
