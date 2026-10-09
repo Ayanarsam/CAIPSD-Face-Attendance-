@@ -126,6 +126,8 @@ function vapidJwt_(aud, privB64url) {
   return jwt;
 }
 
+// BigInt numbers (Apps Script's editor rejects the 0n literal form)
+const N0_ = BigInt(0), N1_ = BigInt(1), N2_ = BigInt(2), N3_ = BigInt(3), N4_ = BigInt(4), N8_ = BigInt(8), N255_ = BigInt(255);
 /* ---- ECDSA P-256 / SHA-256 (RFC 6979 deterministic nonce), pure JavaScript ---- */
 const P256 = {
   p: BigInt('0xffffffff00000001000000000000000000000000ffffffffffffffffffffffff'),
@@ -133,18 +135,18 @@ const P256 = {
   Gx: BigInt('0x6b17d1f2e12c4247f8bce6e563a440f277037d812deb33a0f4a13945d898c296'),
   Gy: BigInt('0x4fe342e2fe1a7f9b8ee7eb4a7c0f9e162bce33576b315ececbb6406837bf51f5')
 };
-function mod_(a, m) { const r = a % m; return r >= 0n ? r : r + m; }
+function mod_(a, m) { const r = a % m; return r >= N0_ ? r : r + m; }
 function inv_(a, m) {   // extended Euclid
-  let [r0, r1] = [mod_(a, m), m], [s0, s1] = [1n, 0n];
-  while (r1 !== 0n) { const q = r0 / r1; [r0, r1] = [r1, r0 - q * r1]; [s0, s1] = [s1, s0 - q * s1]; }
+  let [r0, r1] = [mod_(a, m), m], [s0, s1] = [N1_, N0_];
+  while (r1 !== N0_) { const q = r0 / r1; [r0, r1] = [r1, r0 - q * r1]; [s0, s1] = [s1, s0 - q * s1]; }
   return mod_(s0, m);
 }
 // Jacobian point arithmetic on y^2 = x^3 - 3x + b
 function jDouble_(P) {
-  const p = P256.p; if (!P || P[2] === 0n) return null;
-  const [X, Y, Z] = P, YY = mod_(Y * Y, p), S = mod_(4n * X * YY, p), ZZ = mod_(Z * Z, p);
-  const M = mod_(3n * (X - ZZ) * (X + ZZ), p);
-  const X3 = mod_(M * M - 2n * S, p), Y3 = mod_(M * (S - X3) - 8n * YY * YY, p), Z3 = mod_(2n * Y * Z, p);
+  const p = P256.p; if (!P || P[2] === N0_) return null;
+  const [X, Y, Z] = P, YY = mod_(Y * Y, p), S = mod_(N4_ * X * YY, p), ZZ = mod_(Z * Z, p);
+  const M = mod_(N3_ * (X - ZZ) * (X + ZZ), p);
+  const X3 = mod_(M * M - N2_ * S, p), Y3 = mod_(M * (S - X3) - N8_ * YY * YY, p), Z3 = mod_(N2_ * Y * Z, p);
   return [X3, Y3, Z3];
 }
 function jAdd_(P, Q) {
@@ -154,12 +156,12 @@ function jAdd_(P, Q) {
   const U1 = mod_(X1 * Z2Z2, p), U2 = mod_(X2 * Z1Z1, p), S1 = mod_(Y1 * Z2 * Z2Z2, p), S2 = mod_(Y2 * Z1 * Z1Z1, p);
   if (U1 === U2) return S1 === S2 ? jDouble_(P) : null;
   const H = mod_(U2 - U1, p), R = mod_(S2 - S1, p), HH = mod_(H * H, p), HHH = mod_(H * HH, p), V = mod_(U1 * HH, p);
-  const X3 = mod_(R * R - HHH - 2n * V, p), Y3 = mod_(R * (V - X3) - S1 * HHH, p), Z3 = mod_(Z1 * Z2 * H, p);
+  const X3 = mod_(R * R - HHH - N2_ * V, p), Y3 = mod_(R * (V - X3) - S1 * HHH, p), Z3 = mod_(Z1 * Z2 * H, p);
   return [X3, Y3, Z3];
 }
 function mulG_(k) {
-  let R = null, Q = [P256.Gx, P256.Gy, 1n];
-  while (k > 0n) { if (k & 1n) R = jAdd_(R, Q); Q = jDouble_(Q); k >>= 1n; }
+  let R = null, Q = [P256.Gx, P256.Gy, N1_];
+  while (k > N0_) { if (k & N1_) R = jAdd_(R, Q); Q = jDouble_(Q); k >>= N1_; }
   const zi = inv_(R[2], P256.p), zi2 = mod_(zi * zi, P256.p);
   return [mod_(R[0] * zi2, P256.p), mod_(R[1] * zi2 * zi, P256.p)];
 }
@@ -174,10 +176,10 @@ function es256Sign_(msgBytes, dBytes) {
   for (;;) {
     V = hmac(K, V);
     const k = bytesToBig_(V);
-    if (k >= 1n && k < n) {
+    if (k >= N1_ && k < n) {
       const r = mod_(mulG_(k)[0], n);
       const s = mod_(inv_(k, n) * (z + r * d), n);
-      if (r !== 0n && s !== 0n) return bigTo32_(r).concat(bigTo32_(s));
+      if (r !== N0_ && s !== N0_) return bigTo32_(r).concat(bigTo32_(s));
     }
     K = hmac(K, V.concat([0])); V = hmac(K, V);
   }
@@ -219,8 +221,8 @@ function rateOk_() {
 function out_(t) { return ContentService.createTextOutput(t).setMimeType(ContentService.MimeType.TEXT); }
 function u8_(a) { return a.map(x => (x + 256) % 256); }
 function s8_(a) { return a.map(x => (x > 127 ? x - 256 : x)); }
-function bytesToBig_(a) { let x = 0n; for (const v of a) x = (x << 8n) | BigInt((v + 256) % 256); return x; }
-function bigTo32_(x) { const out = new Array(32); for (let i = 31; i >= 0; i--) { out[i] = Number(x & 255n); x >>= 8n; } return out; }
+function bytesToBig_(a) { let x = N0_; for (const v of a) x = (x << N8_) | BigInt((v + 256) % 256); return x; }
+function bigTo32_(x) { const out = new Array(32); for (let i = 31; i >= 0; i--) { out[i] = Number(x & N255_); x >>= N8_; } return out; }
 function b64url_(bytes) { return Utilities.base64EncodeWebSafe(s8_(u8_(bytes))).replace(/=+$/, ''); }
 function b64urlBytes_(s) { while (s.length % 4) s += '='; return u8_(Utilities.base64DecodeWebSafe(s)); }
 
@@ -247,8 +249,8 @@ function setup() {
 }
 
 function makeVapidKeys_() {
-  let d = 0n;
-  while (d === 0n || d >= P256.n) {
+  let d = N0_;
+  while (d === N0_ || d >= P256.n) {
     const seed = [Utilities.getUuid(), Utilities.getUuid(), Utilities.getUuid(), Utilities.getUuid(), Date.now(), Math.random()].join('|');
     d = bytesToBig_(u8_(Utilities.computeDigest(Utilities.DigestAlgorithm.SHA_256, seed)));
   }
