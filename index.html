@@ -10,7 +10,7 @@
 <meta name="apple-mobile-web-app-capable" content="yes">
 <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
 <meta name="apple-mobile-web-app-title" content="CAIPSD Attendance">
-<meta http-equiv="Content-Security-Policy" content="default-src 'none'; manifest-src 'self'; script-src 'sha256-v9rJKmwGYY9v2vTY2iAX/spJ4LQO92FhBdPNj2dQ28c=' https://cdn.jsdelivr.net/npm/face-api.js@0.22.2/ https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@0.10.14/ 'wasm-unsafe-eval'; style-src 'unsafe-inline' https://fonts.googleapis.com; font-src https://fonts.gstatic.com; img-src 'self' data: blob:; media-src 'self' blob:; connect-src https://cdn.jsdelivr.net/npm/@vladmandic/face-api@1.7.13/model/ https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@0.10.14/ https://storage.googleapis.com/mediapipe-models/face_landmarker/ https://script.google.com/macros/s/ https://script.googleusercontent.com data: blob:; worker-src 'self' blob: https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@0.10.14/; base-uri 'none'; form-action 'none'; object-src 'none'">
+<meta http-equiv="Content-Security-Policy" content="default-src 'none'; manifest-src 'self'; script-src 'sha256-NVSP5j7+AI3weVlBJwikkATBxYUXHHsII7fZqErEWUA=' https://cdn.jsdelivr.net/npm/face-api.js@0.22.2/ https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@0.10.14/ 'wasm-unsafe-eval'; style-src 'unsafe-inline' https://fonts.googleapis.com; font-src https://fonts.gstatic.com; img-src 'self' data: blob:; media-src 'self' blob:; connect-src https://cdn.jsdelivr.net/npm/@vladmandic/face-api@1.7.13/model/ https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@0.10.14/ https://storage.googleapis.com/mediapipe-models/face_landmarker/ https://script.google.com/macros/s/ https://script.googleusercontent.com data: blob:; worker-src 'self' blob: https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@0.10.14/; base-uri 'none'; form-action 'none'; object-src 'none'">
 <meta name="referrer" content="no-referrer">
 <meta name="robots" content="noindex, nofollow">
 <title>CAIPSD Attendance</title>
@@ -557,7 +557,7 @@ const MATCH_MARGIN = 0.06;
 const BLINK_WINDOW_MS = 4000;        // a blink made while being identified still counts
 const PHOTO_WAIT_MS = 300;           // after a blink, wait for eyes to reopen before the check-in photo
 const SUCCESS_HOLD_MS = 1900;
-const LATE_AFTER = '09:15';   // check-ins after this time (24-hour clock) are marked Late; set to '' to turn off
+const LATE_AFTER = '';        // late marking is off; set a time like '09:15' (24-hour clock) to mark later check-ins Late
 const VOICE_ON = true;   // set to false to turn off the spoken "Welcome, name"
 
 let mode = 'recognize';                 // 'recognize' | 'enroll'
@@ -1194,7 +1194,7 @@ function showSuccess(rec, photo) {
   const box = $('success'), ring = $('ring');
   $('sTitle').textContent = `Thank you, ${rec.name.split(' ')[0]}!`;
   const tm = new Date(rec.ts).toLocaleTimeString([], { hour: 'numeric', minute: '2-digit' });
-  $('sMeta').textContent = `Attendance marked at ${tm}` + (rec.late ? ' (late)' : '') + (rec.section ? `, ${rec.section}` : '');
+  $('sMeta').textContent = `Attendance marked at ${tm}` + (rec.section ? `, ${rec.section}` : '');
   const st = weekStats().rows.find(r => r.name === rec.name);
   $('sWeek').textContent = st && st.pct !== null ? `This week: ${st.count} of ${st.denom} day${st.denom === 1 ? '' : 's'}, ${st.pct}%` : '';
   const run = streaks().get(rec.name) || 0;
@@ -1443,7 +1443,7 @@ function renderLog() {
   if (!records.length) { body.appendChild(h('tr', null, h('td', { colSpan: 5, class: 'empty-state' }, h('div', { class: 'empty-ico', text: '📋' }), h('div', { text: 'No attendance yet. Students appear here as soon as they blink to check in.' })))); return; }
   for (const r of records.slice().reverse().slice(0, 150)) {   // newest 150 rows on screen; CSV export has everything
     const av = h('div', { class: 'avatar', text: (r.name || '?').charAt(0).toUpperCase() });
-    const row = h('tr', null, h('td', null, h('div', { class: 'namecell' }, av, h('span', { text: r.name }))), h('td', { text: r.section || '' }), h('td', { text: r.date }), h('td', { text: r.time }), h('td', null, r.late ? h('span', { class: 'chip-late', text: 'Late' }) : h('span', { class: 'chip-ok', text: 'Present' })));
+    const row = h('tr', null, h('td', null, h('div', { class: 'namecell' }, av, h('span', { text: r.name }))), h('td', { text: r.section || '' }), h('td', { text: r.date }), h('td', { text: r.time }), h('td', null, (LATE_AFTER && r.late) ? h('span', { class: 'chip-late', text: 'Late' }) : h('span', { class: 'chip-ok', text: 'Present' })));
     if (r.ts === highlightTs) row.className = 'new';
     body.appendChild(row);
   }
@@ -1455,7 +1455,7 @@ async function clearRecords() {
 }
 function exportCSV() {
   let csv = 'Name,Section,Date,Time,Status\n';
-  records.forEach(r => { csv += [r.name, r.section, r.date, r.time, r.late ? 'Late' : 'On time'].map(csvCell).join(',') + '\n'; });
+  records.forEach(r => { csv += [r.name, r.section, r.date, r.time, (LATE_AFTER && r.late) ? 'Late' : 'Present'].map(csvCell).join(',') + '\n'; });
   downloadText(csv, 'attendance_' + localDate(new Date()) + '.csv', 'text/csv');
 }
 
