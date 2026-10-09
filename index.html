@@ -10,7 +10,7 @@
 <meta name="apple-mobile-web-app-capable" content="yes">
 <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
 <meta name="apple-mobile-web-app-title" content="CAIPSD Attendance">
-<meta http-equiv="Content-Security-Policy" content="default-src 'none'; manifest-src 'self'; script-src 'sha256-SOY9Tb/Slrkve7p9kDWyPCaOutP3/2ly5ku9J4lemg0=' https://cdn.jsdelivr.net/npm/face-api.js@0.22.2/ https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@0.10.14/ 'wasm-unsafe-eval'; style-src 'unsafe-inline' https://fonts.googleapis.com; font-src https://fonts.gstatic.com; img-src 'self' data: blob:; media-src 'self' blob:; connect-src https://cdn.jsdelivr.net/npm/@vladmandic/face-api@1.7.13/model/ https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@0.10.14/ https://storage.googleapis.com/mediapipe-models/face_landmarker/ https://script.google.com/macros/s/ https://script.googleusercontent.com data: blob:; worker-src 'self' blob: https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@0.10.14/; base-uri 'none'; form-action 'none'; object-src 'none'">
+<meta http-equiv="Content-Security-Policy" content="default-src 'none'; manifest-src 'self'; script-src 'sha256-DV4EQ76KaW6H0tVbpgqH+AQHMNX/285TKZ1KTIU9Vsk=' https://cdn.jsdelivr.net/npm/face-api.js@0.22.2/ https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@0.10.14/ 'wasm-unsafe-eval'; style-src 'unsafe-inline' https://fonts.googleapis.com; font-src https://fonts.gstatic.com; img-src 'self' data: blob:; media-src 'self' blob:; connect-src https://cdn.jsdelivr.net/npm/@vladmandic/face-api@1.7.13/model/ https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@0.10.14/ https://storage.googleapis.com/mediapipe-models/face_landmarker/ https://script.google.com/macros/s/ https://script.googleusercontent.com data: blob:; worker-src 'self' blob: https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@0.10.14/; base-uri 'none'; form-action 'none'; object-src 'none'">
 <meta name="referrer" content="no-referrer">
 <meta name="robots" content="noindex, nofollow">
 <title>CAIPSD Attendance</title>
@@ -576,6 +576,12 @@ function sanitizeRecords(list) {
     .map(r => ({ name: clean(r.name, 60), section: clean(r.section, 20), date: clean(r.date, 40), time: clean(r.time, 40), ts: r.ts, late: r.late === true }))
     .filter(r => r.name);
 }
+function localDate(d) { return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`; }
+function downloadText(text, name, type) {
+  const url = URL.createObjectURL(new Blob([text], { type }));
+  const a = document.createElement('a'); a.href = url; a.download = name; document.body.appendChild(a); a.click(); a.remove();
+  setTimeout(() => URL.revokeObjectURL(url), 10000);
+}
 function csvCell(v) { let s = String(v ?? ''); if (/^[=+\-@\t\r]/.test(s)) s = "'" + s; return '"' + s.replace(/"/g, '""') + '"'; }
 function setStatus(text, kind, hold) {
   const now = performance.now();
@@ -615,15 +621,6 @@ async function putPhoto(ts, dataUrl) {
     photoCache.set(ts, dataUrl);
   } catch (e) { console.warn('Photo save failed', e); }
 }
-async function getPhoto(ts) {
-  if (photoCache.has(ts)) return photoCache.get(ts);
-  try {
-    const db = await openDB();
-    const v = await new Promise((res, rej) => { const q = db.transaction('photos').objectStore('photos').get(ts); q.onsuccess = () => res(q.result); q.onerror = () => rej(q.error); });
-    const o = await unseal(v); if (o && safeImg(o.img)) { photoCache.set(ts, o.img); return o.img; }
-  } catch (e) {}
-  return null;
-}
 async function clearPhotos() {
   photoCache.clear();
   try { const db = await openDB(); await new Promise((res, rej) => { const tx = db.transaction('photos', 'readwrite'); tx.objectStore('photos').clear(); tx.oncomplete = res; tx.onerror = () => rej(tx.error); }); } catch (e) {}
@@ -657,7 +654,10 @@ function persist() {
   saveQueue = saveQueue.then(async () => {
     localStorage.setItem(KEY.enr, await seal(enrollments.map(x => ({ id: x.id, name: x.name, section: x.section, descriptor: Array.from(x.descriptor) }))));
     localStorage.setItem(KEY.rec, await seal(records));
-  }).catch(err => console.error('Save failed', err));
+  }).catch(err => {
+    console.error('Save failed', err);
+    if (err && (err.name === 'QuotaExceededError' || /quota/i.test(err.message || ''))) setStatus('This device’s storage is full. Export the CSV, then use Clear all to free space (the Google Sheet keeps everything).', 'err', 30000);
+  });
   return saveQueue;
 }
 async function loadData() {
@@ -689,13 +689,18 @@ async function startCamera() {
     video.classList.toggle('mirror', facing === 'user');
     await new Promise(res => { if (video.readyState >= 1) res(); else video.onloadedmetadata = res; });
     video.play().catch(() => {});
+    camError = '';
     setStatus(engineReady ? 'Camera ready. Look at the camera.' : 'Starting face engine…', 'wait');
+    return true;
   } catch (err) {
-    setStatus(err.name === 'NotAllowedError' ? 'Camera blocked. Allow camera access and reload.' : 'Camera error: ' + err.message, 'err');
+    camError = err.name === 'NotAllowedError' ? 'Camera blocked. Allow camera access in the browser settings, then reload.' : 'Camera error: ' + err.message;
+    setStatus(camError, 'err', 600000);   // stays on screen until fixed
+    return false;
   }
 }
+let camError = '';
 function stopCamera() { if (mediaStream) mediaStream.getTracks().forEach(t => t.stop()); mediaStream = null; }
-async function flipCamera() { facing = facing === 'user' ? 'environment' : 'user'; tracks = []; await startCamera(); }
+async function flipCamera() { facing = facing === 'user' ? 'environment' : 'user'; tracks = []; if (await startCamera() && !faceLandmarker) loadMediapipe(); }
 
 /* ---------- detection: a fast eye/blink loop that never waits for face recognition ---------- */
 // MediaPipe eye contours (person's right eye = left side of the raw image)
@@ -745,7 +750,7 @@ async function loadMediapipe() {
 let hadFace = false;
 async function faLoop() {
   if (engine !== 'faceapi') return;
-  try { await faFrame(); } catch (e) { console.warn(e); }
+  try { await faFrame(); engineOk(); } catch (e) { console.warn(e); engineFailed(e); }
   setTimeout(faLoop, hadFace ? (isLite() ? 30 : 0) : 150);
 }
 async function faFrame() {
@@ -769,7 +774,7 @@ async function faFrame() {
 
 /* Engine B (preferred): MediaPipe face mesh + blink blendshapes on every video frame (~30 fps).
    Identity runs asynchronously alongside it, so blinks are never missed. */
-let lastVideoTime = -1, lastFaceAt = 0;
+let lastVideoTime = -1, lastFaceAt = -Infinity;   // no face seen yet
 let detCost = 15;
 function mpLoop() {
   if (engine !== 'mp') return;
@@ -784,7 +789,7 @@ function mpLoop() {
 function mpStep() {
   if (document.hidden || !video || video.readyState < 2 || !video.videoWidth || video.currentTime === lastVideoTime) return;
   lastVideoTime = video.currentTime;
-  let res; try { res = faceLandmarker.detectForVideo(video, performance.now()); } catch (e) { return; }
+  let res; try { res = faceLandmarker.detectForVideo(video, performance.now()); engineOk(); } catch (e) { engineFailed(e); return; }
   const W = video.videoWidth, H = video.videoHeight, faces = [];
   for (let i = 0; i < res.faceLandmarks.length; i++) {
     const lm = res.faceLandmarks[i];
@@ -799,11 +804,19 @@ function mpStep() {
   if (recogReady && !idBusy && needsIdentity(performance.now())) runIdentity();
 }
 
-// a face filling a good part of the picture is found just as well at 160 px, in about half the time
 function idInputSize() { return ID_INPUT_SIZE; }   // keep one size: changing it makes the GPU recompile (stutter)
 function needsIdentity(t) {
   if (mode === 'enroll') return tracks.length > 0 && t - lastEnrollIdAt > 250;
-  return tracks.some(tr => t - tr.lastSeen < 300 && (tr.name === null || (tr.name === 'Unknown' && t - tr.lastIdAt > ID_RETRY_MS) || t - tr.lastIdAt > ID_REVERIFY_MS));
+  return tracks.some(tr => t - tr.lastSeen < 300 && (tr.name === null || (tr.name === 'Unknown' && t - tr.lastIdAt > (tr.unknownHits >= 3 ? 1200 : ID_RETRY_MS)) || t - tr.lastIdAt > ID_REVERIFY_MS));
+}
+let engineFails = 0;
+function engineOk() { engineFails = 0; }
+function engineFailed(e) {
+  if (++engineFails === 40) {   // ~40 failures in a row: the engine is broken, not just one bad frame
+    console.error('Face engine keeps failing, restarting', e);
+    setStatus('Face engine stopped working. Restarting…', 'err', 15000);
+    reloadWhenFree();
+  }
 }
 let idCost = 120, idNextAt = 0;
 async function runIdentity() {
@@ -812,8 +825,8 @@ async function runIdentity() {
   try {
     const opts = new faceapi.TinyFaceDetectorOptions({ inputSize: idInputSize(), scoreThreshold: 0.45 });
     const dets = await faceapi.detectAllFaces(video, opts).withFaceLandmarks().withFaceDescriptors();
-    applyIdentity(dets, performance.now());
-  } catch (e) { console.warn('Identity pass failed', e); }
+    applyIdentity(dets, performance.now()); engineOk();
+  } catch (e) { console.warn('Identity pass failed', e); engineFailed(e); }
   idCost = idCost * 0.7 + (performance.now() - t0) * 0.3;
   idNextAt = performance.now() + Math.min(600, idCost * 0.8);   // let the blink engine breathe between identity passes
   idBusy = false;
@@ -1231,9 +1244,7 @@ function exportWeekCSV() {
   const st = weekStats(), label = { p: 'Present', a: 'Absent', t: '', f: '' };
   let csv = 'Name,Section,' + DAY_SHORT.join(',') + ',Days present,Days counted,Percentage\n';
   for (const r of st.rows) csv += [r.name, r.section, ...r.days.map(v => label[v]), r.count, r.denom, r.pct === null ? '' : r.pct + '%'].map(csvCell).join(',') + '\n';
-  const url = URL.createObjectURL(new Blob([csv], { type: 'text/csv' }));
-  const a = document.createElement('a'); a.href = url; a.download = 'weekly_attendance_' + st.w.monday.toISOString().slice(0, 10) + '.csv'; a.click();
-  setTimeout(() => URL.revokeObjectURL(url), 5000);
+  downloadText(csv, 'weekly_attendance_' + localDate(st.w.monday) + '.csv', 'text/csv');
 }
 
 /* ---------- enrollment ---------- */
@@ -1282,7 +1293,6 @@ function presentToday() {
   if (presentCache.key !== key) presentCache = { key, set: new Set(records.filter(r => r.date === today).map(r => r.name)) };
   return presentCache.set;
 }
-function isRecordedToday(name) { return presentToday().has(name); }
 function capturePhoto() {
   try {
     const w = 320, ratio = (video.videoHeight / video.videoWidth) || 0.75;
@@ -1301,7 +1311,7 @@ function recordAttendance(name) {
   const photo = capturePhoto();
   const rec = { name, section: enr ? enr.section : '', date: now.toLocaleDateString(), time: now.toLocaleTimeString(), ts: now.getTime(), late: isLate(now) };
   records.push(rec); highlightTs = rec.ts; presentCache.key = '';
-  later(() => { renderLog(); persist(); if (photo) putPhoto(rec.ts, photo); });   // after the thank-you animation starts   // kept on-device and sent to the Sheet, not shown in the list
+  later(() => { renderLog(); persist(); if (photo) putPhoto(rec.ts, photo); });   // after the thank-you animation starts; the photo stays on-device and goes to the Sheet
   if (syncEnabled()) {
     const payload = { ...rec, status: rec.late ? 'Late' : 'On time', token: SYNC_TOKEN }; if (photo) payload.image = photo;
     queueSync(payload);
@@ -1310,10 +1320,10 @@ function recordAttendance(name) {
 }
 
 /* ---------- offline sync: every check-in waits in an encrypted outbox until the Sheet receives it ---------- */
-let outboxCount = 0, flushing = false, outboxReady = false;   // ready once the device key has loaded
+let outboxCount = 0, flushing = false, flushAgain = false, outboxReady = false;   // ready once the device key has loaded
 function syncEnabled() { return GOOGLE_SHEET_WEB_APP_URL.startsWith('https://script.google.com/macros/s/'); }
-function outboxTx(mode, fn) {
-  return openDB().then(db => new Promise((res, rej) => { const tx = db.transaction('outbox', mode); const out = fn(tx.objectStore('outbox')); tx.oncomplete = () => res(out && out.result); tx.onerror = () => rej(tx.error); }));
+function outboxTx(txMode, fn) {
+  return openDB().then(db => new Promise((res, rej) => { const tx = db.transaction('outbox', txMode); const out = fn(tx.objectStore('outbox')); tx.oncomplete = () => res(out && out.result); tx.onerror = () => rej(tx.error); }));
 }
 async function refreshSyncPill() {
   try { outboxCount = await outboxTx('readonly', s => s.count()) || 0; } catch (e) {}
@@ -1334,7 +1344,8 @@ function sendToSheet(payload) {
 }
 async function flushOutbox() {
   if (!outboxReady) return;
-  if (flushing || !syncEnabled() || !navigator.onLine) { refreshSyncPill(); return; }
+  if (flushing) { flushAgain = true; return; }
+  if (!syncEnabled() || !navigator.onLine) { refreshSyncPill(); return; }
   flushing = true;
   try {
     const keys = await outboxTx('readonly', s => s.getAllKeys()) || [];
@@ -1349,6 +1360,7 @@ async function flushOutbox() {
     }
   } catch (e) { console.error('Outbox flush failed', e); }
   flushing = false; refreshSyncPill();
+  if (flushAgain) { flushAgain = false; flushOutbox(); }
 }
 let lastCounts = '';
 function renderLog() {
@@ -1377,9 +1389,7 @@ async function clearRecords() {
 function exportCSV() {
   let csv = 'Name,Section,Date,Time,Status\n';
   records.forEach(r => { csv += [r.name, r.section, r.date, r.time, r.late ? 'Late' : 'On time'].map(csvCell).join(',') + '\n'; });
-  const url = URL.createObjectURL(new Blob([csv], { type: 'text/csv' }));
-  const a = document.createElement('a'); a.href = url; a.download = 'attendance_' + new Date().toISOString().slice(0, 10) + '.csv'; a.click();
-  setTimeout(() => URL.revokeObjectURL(url), 5000);
+  downloadText(csv, 'attendance_' + localDate(new Date()) + '.csv', 'text/csv');
 }
 
 /* ---------- views ---------- */
@@ -1431,7 +1441,7 @@ async function init() {
   setProgress(30, 'Starting camera…');
   const camP = startCamera();                 // camera and stored data start together
   const dataP = loadData();
-  camP.then(() => loadMediapipe());          // fast blink engine loads alongside everything else
+  camP.then(ok => { if (ok) loadMediapipe(); });   // fast blink engine (skipped if the camera is blocked)
 
   // Open the app as soon as the stored data is ready; the face engine finishes loading behind it.
   await dataP;
@@ -1448,7 +1458,7 @@ async function init() {
   unlockAudio();
   outboxReady = true; flushOutbox();   // send anything saved while the device was offline
   requestAnimationFrame(render);
-  setStatus('Starting face engine…', 'wait');
+  if (!camError) setStatus('Starting face engine…', 'wait');
 
   // ---- face engine (background) ----
   await libP;
@@ -1463,7 +1473,7 @@ async function init() {
   ]);
   await Promise.race([warmDetector(), timeout(1500)]);
   engineReady = true;
-  if (!tracks.length) setStatus('Look at the camera and blink once.', 'wait');
+  if (!tracks.length && !camError) setStatus('Look at the camera and blink once.', 'wait');
   faLoop();
   recogFile
     .then(warmIdentity)   // prepares the exact recognition steps used at check-in, so the first person never hits a freeze
@@ -1532,19 +1542,21 @@ keepAwake();
 // and reload into it when nobody is standing at the camera.
 if ('serviceWorker' in navigator && location.protocol === 'https:') {
   const hadController = !!navigator.serviceWorker.controller;
-  let reloading = false;
-  const reloadWhenFree = () => {
-    if (reloading) return;
-    const typing = document.activeElement && /^(INPUT|TEXTAREA)$/.test(document.activeElement.tagName);
-    if (hadFaceRecently() || mode === 'enroll' || typing) { setTimeout(reloadWhenFree, 5000); return; }
-    reloading = true; location.reload();
-  };
   navigator.serviceWorker.addEventListener('controllerchange', () => { if (hadController) reloadWhenFree(); });
   navigator.serviceWorker.addEventListener('message', (e) => { if (e.data && e.data.type === 'page-updated') reloadWhenFree(); });
   window.addEventListener('load', () => navigator.serviceWorker.register('sw.js', { updateViaCache: 'none' }).then(reg => {
     setInterval(() => reg.update().catch(() => {}), 15 * 60 * 1000);
     document.addEventListener('visibilitychange', () => { if (!document.hidden) reg.update().catch(() => {}); });
   }).catch(e => console.warn('Offline cache unavailable', e)));
+}
+// reload only when nobody is checking in, enrolling or typing (and the newest check-in has been saved)
+let reloading = false;
+function reloadWhenFree() {
+  if (reloading) return;
+  const typing = document.activeElement && /^(INPUT|TEXTAREA)$/.test(document.activeElement.tagName);
+  if (hadFaceRecently() || mode === 'enroll' || typing) { setTimeout(reloadWhenFree, 5000); return; }
+  reloading = true;
+  saveQueue.then(() => location.reload());
 }
 function hadFaceRecently() { return (typeof lastFaceAt === 'number' && performance.now() - lastFaceAt < 8000) || tracks.length > 0; }
 
