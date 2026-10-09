@@ -2,7 +2,6 @@
    so the app starts fast and still opens when the internet is down. */
 const CACHE = 'rollcall-assets-v1';
 const PAGE_CACHE = 'rollcall-page-v3';
-const PREFS = 'rollcall-prefs';                          // the name typed for attendance reminders
 
 // Versioned files that never change at the same URL: serve from the device first.
 const ASSET_HOSTS = ['cdn.jsdelivr.net', 'storage.googleapis.com', 'fonts.gstatic.com'];
@@ -10,7 +9,7 @@ const ASSET_HOSTS = ['cdn.jsdelivr.net', 'storage.googleapis.com', 'fonts.gstati
 self.addEventListener('install', () => self.skipWaiting());
 self.addEventListener('activate', (e) => {
   e.waitUntil((async () => {
-    const keep = new Set([CACHE, PAGE_CACHE, PREFS]);
+    const keep = new Set([CACHE, PAGE_CACHE]);
     for (const k of await caches.keys()) if (!keep.has(k)) await caches.delete(k);
     await self.clients.claim();
   })());
@@ -65,23 +64,3 @@ async function pageFirst(e) {
 async function notifyUpdate() {
   for (const c of await self.clients.matchAll({ type: 'window' })) c.postMessage({ type: 'page-updated' });
 }
-
-// Attendance reminder: the reminder service sends an empty push at 9:30 on weekdays to people who haven't checked in.
-self.addEventListener('push', (e) => {
-  e.waitUntil((async () => {
-    let name = '';
-    try { const r = await (await caches.open(PREFS)).match('/remind-name'); if (r) name = (await r.text()).trim().split(' ')[0]; } catch (err) {}
-    await self.registration.showNotification('CAIPSD Attendance', {
-      body: (name ? name + ', you' : 'You') + " haven't marked your attendance today. Please check in.",
-      icon: 'icon-192.png?v=3', badge: 'icon-192.png?v=3', tag: 'attendance-reminder', renotify: true
-    });
-  })());
-});
-self.addEventListener('notificationclick', (e) => {
-  e.notification.close();
-  e.waitUntil((async () => {
-    const scope = self.registration.scope;
-    for (const c of await self.clients.matchAll({ type: 'window', includeUncontrolled: true })) if (c.url.startsWith(scope) && 'focus' in c) return c.focus();
-    return self.clients.openWindow(scope);
-  })());
-});
