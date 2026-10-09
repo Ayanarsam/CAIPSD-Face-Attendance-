@@ -10,7 +10,7 @@
 <meta name="apple-mobile-web-app-capable" content="yes">
 <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
 <meta name="apple-mobile-web-app-title" content="CAIPSD Attendance">
-<meta http-equiv="Content-Security-Policy" content="default-src 'none'; manifest-src 'self'; script-src 'sha256-eGtIPeQlwPVIHam5g0sWqAI7C4wRFoh4VOemYUx/1TI=' https://cdn.jsdelivr.net/npm/face-api.js@0.22.2/ https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@0.10.14/ 'wasm-unsafe-eval'; style-src 'unsafe-inline' https://fonts.googleapis.com; font-src https://fonts.gstatic.com; img-src 'self' data: blob:; media-src 'self' blob:; connect-src https://cdn.jsdelivr.net/npm/@vladmandic/face-api@1.7.13/model/ https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@0.10.14/ https://storage.googleapis.com/mediapipe-models/face_landmarker/ https://script.google.com/macros/s/ https://script.googleusercontent.com data: blob:; worker-src 'self' blob: https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@0.10.14/; base-uri 'none'; form-action 'none'; object-src 'none'">
+<meta http-equiv="Content-Security-Policy" content="default-src 'none'; manifest-src 'self'; script-src 'sha256-v9rJKmwGYY9v2vTY2iAX/spJ4LQO92FhBdPNj2dQ28c=' https://cdn.jsdelivr.net/npm/face-api.js@0.22.2/ https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@0.10.14/ 'wasm-unsafe-eval'; style-src 'unsafe-inline' https://fonts.googleapis.com; font-src https://fonts.gstatic.com; img-src 'self' data: blob:; media-src 'self' blob:; connect-src https://cdn.jsdelivr.net/npm/@vladmandic/face-api@1.7.13/model/ https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@0.10.14/ https://storage.googleapis.com/mediapipe-models/face_landmarker/ https://script.google.com/macros/s/ https://script.googleusercontent.com data: blob:; worker-src 'self' blob: https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@0.10.14/; base-uri 'none'; form-action 'none'; object-src 'none'">
 <meta name="referrer" content="no-referrer">
 <meta name="robots" content="noindex, nofollow">
 <title>CAIPSD Attendance</title>
@@ -1551,12 +1551,13 @@ async function init() {
 }
 
 /* ---------- enrollment passcode ----------
-   Enrolling (and deleting) students needs a passcode. It is created on this device the first time someone opens
-   "Enroll student" and stored only as a salted PBKDF2 hash. The enroll screen locks again when you leave it
+   Enrolling (and deleting) students needs a passcode. The CAIPSD passcode is built in (stored only as a salted
+   PBKDF2 hash); 'Change enrollment passcode' replaces it on one device. The enroll screen locks again when you leave it
    or after 3 minutes without use. */
 const PIN_KEY = 'caipsd_enroll_pin', ENROLL_IDLE_MS = 3 * 60 * 1000;
 let pinFails = 0, pinLockedUntil = 0, enrollIdleTimer = 0;
-function loadPin() { try { const v = JSON.parse(localStorage.getItem(PIN_KEY) || 'null'); return v && v.salt && v.hash ? v : null; } catch (e) { return null; } }
+const DEFAULT_PIN = { salt: '61jLDqIKmo4QVbu/cbOJow==', hash: 'I1x/wMSVWixZ47WNrPNuV5U2SLjv0KkWqw5j9O8Os7s=' };   // the CAIPSD passcode, used until it is changed on a device
+function loadPin() { try { const v = JSON.parse(localStorage.getItem(PIN_KEY) || 'null'); return v && v.salt && v.hash ? v : DEFAULT_PIN; } catch (e) { return DEFAULT_PIN; } }
 async function hashPin(pin, saltB64) {
   const base = await crypto.subtle.importKey('raw', enc.encode(pin), 'PBKDF2', false, ['deriveBits']);
   const bits = await crypto.subtle.deriveBits({ name: 'PBKDF2', hash: 'SHA-256', salt: fromB64(saltB64), iterations: 150000 }, base, 256);
@@ -1585,7 +1586,7 @@ function askPin(kind) {
     const show = () => {
       const t = { check: ['Enter passcode', 'Enrolling students needs the passcode.', 'Unlock'],
                   old: ['Change passcode', 'Enter the current passcode first.', 'Next'],
-                  new: [loadPin() ? 'New passcode' : 'Create a passcode', 'Choose a 4–12 digit passcode. It will be needed every time someone enrolls or deletes a student on this device.', 'Save'] }[step];
+                  new: ['New passcode', 'Choose a 4–12 digit passcode. It will be needed every time someone enrolls or deletes a student on this device.', 'Save'] }[step];
       $('pinTitle').textContent = t[0]; $('pinText').textContent = t[1]; $('pinOk').textContent = t[2];
       inp.value = ''; inp2.value = ''; inp2.hidden = step !== 'new'; inp.placeholder = step === 'new' ? 'New passcode' : '';
       veil.hidden = false; setTimeout(() => inp.focus(), 30);
