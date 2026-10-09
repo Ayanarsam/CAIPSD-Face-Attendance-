@@ -64,3 +64,18 @@ async function pageFirst(e) {
 async function notifyUpdate() {
   for (const c of await self.clients.matchAll({ type: 'window' })) c.postMessage({ type: 'page-updated' });
 }
+
+// 9:30 attendance reminder: the reminder service sends an empty push on weekdays.
+self.addEventListener('push', (e) => {
+  e.waitUntil(self.registration.showNotification('CAIPSD Attendance', {
+    body: 'Please mark your attendance.', icon: 'icon-192.png?v=3', badge: 'icon-192.png?v=3', tag: 'attendance-reminder', renotify: true
+  }));
+});
+self.addEventListener('notificationclick', (e) => {
+  e.notification.close();
+  e.waitUntil((async () => {
+    const scope = self.registration.scope;
+    for (const c of await self.clients.matchAll({ type: 'window', includeUncontrolled: true })) if (c.url.startsWith(scope) && 'focus' in c) return c.focus();
+    return self.clients.openWindow(scope);
+  })());
+});
