@@ -24,7 +24,8 @@ function doPost(e) {
     if (!e || !e.postData || !e.postData.contents || e.postData.contents.length > 5000) return out_('rejected');
     const b = JSON.parse(e.postData.contents);
     const props = PropertiesService.getScriptProperties();
-    if (!b || b.token !== props.getProperty('SYNC_TOKEN')) return out_('rejected');
+    const token = props.getProperty('SYNC_TOKEN');                       // optional extra check
+    if (!b || (token && b.token !== token)) return out_('rejected');
     if (!rateOk_()) return out_('busy');
     const lock = LockService.getScriptLock();
     if (!lock.tryLock(15000)) return out_('busy');
@@ -224,21 +225,33 @@ function b64url_(bytes) { return Utilities.base64EncodeWebSafe(s8_(u8_(bytes))).
 function b64urlBytes_(s) { while (s.length % 4) s += '='; return u8_(Utilities.base64DecodeWebSafe(s)); }
 
 /* ======================= SETUP STEPS =======================
- * 1. Go to script.google.com → New project. Name it "CAIPSD Attendance Reminders".
- * 2. Delete the sample code, paste this whole file, and Save.
- * 3. Project Settings (gear) → Script Properties → add three properties:
- *      VAPID_PUBLIC_KEY   = (the public key Claude gave you)
- *      VAPID_PRIVATE_KEY  = (the private key Claude gave you, keep it secret)
- *      SYNC_TOKEN         = (the same token the attendance app uses)
- * 4. Back in the editor, choose "setup" in the toolbar and click Run. Allow the permissions it asks for.
- *    This creates the "CAIPSD Attendance Reminders" sheet in your Drive and the 9:30 weekday timer.
- * 5. Deploy → New deployment → type "Web app". Execute as: Me. Who has access: Anyone. Deploy.
- *    Copy the Web app URL and send it to Claude (it goes into the app's settings).
+ * 1. script.google.com → New project ("CAIPSD Attendance Reminders"). Paste this file and Save.
+ * 2. Choose "setup" in the toolbar and click Run. Allow the permissions it asks for.
+ *    It creates the reminder sheet, the 9:30 weekday timer and this project's own push keys,
+ *    and prints the PUBLIC KEY in the log (that one goes into the app; it isn't secret).
+ * 3. Deploy → New deployment → Web app. Execute as: Me. Who has access: Anyone. Deploy, copy the URL.
+ * Optional: Project Settings → Script Properties → SYNC_TOKEN = the app's token, to accept only app requests.
  */
 function setup() {
+  const props = PropertiesService.getScriptProperties();
+  if (!props.getProperty('VAPID_PUBLIC_KEY') || !props.getProperty('VAPID_PRIVATE_KEY')) {
+    const keys = makeVapidKeys_();   // the private key stays inside this project's settings
+    props.setProperties({ VAPID_PUBLIC_KEY: keys.pub, VAPID_PRIVATE_KEY: keys.priv });
+  }
   sheet_('Subscribers', ['Name', 'Endpoint', 'Added', 'Last reminded']);
   sheet_('Present', ['Date', 'Name', 'Received']);
   ScriptApp.getProjectTriggers().filter(t => t.getHandlerFunction() === 'remind').forEach(t => ScriptApp.deleteTrigger(t));
   ScriptApp.newTrigger('remind').timeBased().everyDays(1).atHour(REMIND_AT.hour).nearMinute(REMIND_AT.minute).inTimezone(TIMEZONE).create();
-  console.log('Ready. Reminder sheet: ' + SpreadsheetApp.openById(PropertiesService.getScriptProperties().getProperty('SHEET_ID')).getUrl());
+  console.log('Ready. Reminder sheet: ' + SpreadsheetApp.openById(props.getProperty('SHEET_ID')).getUrl());
+  console.log('PUBLIC KEY (goes into the app): ' + props.getProperty('VAPID_PUBLIC_KEY'));
+}
+
+function makeVapidKeys_() {
+  let d = 0n;
+  while (d === 0n || d >= P256.n) {
+    const seed = [Utilities.getUuid(), Utilities.getUuid(), Utilities.getUuid(), Utilities.getUuid(), Date.now(), Math.random()].join('|');
+    d = bytesToBig_(u8_(Utilities.computeDigest(Utilities.DigestAlgorithm.SHA_256, seed)));
+  }
+  const xy = mulG_(d);
+  return { pub: b64url_([4].concat(bigTo32_(xy[0]), bigTo32_(xy[1]))), priv: b64url_(bigTo32_(d)) };
 }
