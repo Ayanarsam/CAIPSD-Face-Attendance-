@@ -10,7 +10,7 @@
 <meta name="apple-mobile-web-app-capable" content="yes">
 <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
 <meta name="apple-mobile-web-app-title" content="CAIPSD Attendance">
-<meta http-equiv="Content-Security-Policy" content="default-src 'none'; manifest-src 'self'; script-src 'sha256-DV4EQ76KaW6H0tVbpgqH+AQHMNX/285TKZ1KTIU9Vsk=' https://cdn.jsdelivr.net/npm/face-api.js@0.22.2/ https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@0.10.14/ 'wasm-unsafe-eval'; style-src 'unsafe-inline' https://fonts.googleapis.com; font-src https://fonts.gstatic.com; img-src 'self' data: blob:; media-src 'self' blob:; connect-src https://cdn.jsdelivr.net/npm/@vladmandic/face-api@1.7.13/model/ https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@0.10.14/ https://storage.googleapis.com/mediapipe-models/face_landmarker/ https://script.google.com/macros/s/ https://script.googleusercontent.com data: blob:; worker-src 'self' blob: https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@0.10.14/; base-uri 'none'; form-action 'none'; object-src 'none'">
+<meta http-equiv="Content-Security-Policy" content="default-src 'none'; manifest-src 'self'; script-src 'sha256-/LbxQUM19cC80sZOdVc2RXji2r2lsW1YQmF2tStIZsg=' https://cdn.jsdelivr.net/npm/face-api.js@0.22.2/ https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@0.10.14/ 'wasm-unsafe-eval'; style-src 'unsafe-inline' https://fonts.googleapis.com; font-src https://fonts.gstatic.com; img-src 'self' data: blob:; media-src 'self' blob:; connect-src https://cdn.jsdelivr.net/npm/@vladmandic/face-api@1.7.13/model/ https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@0.10.14/ https://storage.googleapis.com/mediapipe-models/face_landmarker/ https://script.google.com/macros/s/ https://script.googleusercontent.com data: blob:; worker-src 'self' blob: https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@0.10.14/; base-uri 'none'; form-action 'none'; object-src 'none'">
 <meta name="referrer" content="no-referrer">
 <meta name="robots" content="noindex, nofollow">
 <title>CAIPSD Attendance</title>
@@ -747,7 +747,7 @@ async function loadMediapipe() {
 
 /* Engine A (until MediaPipe is ready): face-api box + 68 landmarks every frame.
    Identity is computed in the same pass only when a face actually needs it. */
-let hadFace = false;
+let hadFace = false, faScan = 0, faWide = false, faMiss = 0;
 async function faLoop() {
   if (engine !== 'faceapi') return;
   try { await faFrame(); engineOk(); } catch (e) { console.warn(e); engineFailed(e); }
@@ -755,21 +755,21 @@ async function faLoop() {
 }
 async function faFrame() {
   if (document.hidden || !video || video.readyState < 2 || !video.videoWidth) { hadFace = false; return; }
-  const t = performance.now();
-  const withId = recogReady && needsIdentity(t);
-  const opts = new faceapi.TinyFaceDetectorOptions({ inputSize: withId ? idInputSize() : FAST_INPUT_SIZE, scoreThreshold: 0.5 });
-  const dets = withId
-    ? await faceapi.detectAllFaces(video, opts).withFaceLandmarks().withFaceDescriptors()
-    : await faceapi.detectAllFaces(video, opts).withFaceLandmarks();
+  // track faces every frame (recognition runs afterwards on a close-up, see runIdentity).
+  // Nobody found lately: every 4th frame take a wider look (320 px) so people standing further back are found;
+  // once someone is found that way, keep the wide look while they stay, and go back to the fast size when they leave.
+  const wide = faWide || (!hadFace && ++faScan % 4 === 0);
+  const dets = await faceapi.detectAllFaces(video, new faceapi.TinyFaceDetectorOptions({ inputSize: wide ? 320 : FAST_INPUT_SIZE, scoreThreshold: 0.5 })).withFaceLandmarks();
   if (engine !== 'faceapi') return;
   const now = performance.now();
-  hadFace = dets.length > 0;
+  hadFace = dets.length > 0; if (hadFace) lastFaceAt = now;
+  if (hadFace) { faMiss = 0; if (wide) faWide = true; } else if (faWide && ++faMiss > 8) { faWide = false; faMiss = 0; }
   const faces = dets.map(det => {
     const lp = det.landmarks.getLeftEye(), rp = det.landmarks.getRightEye();
     return { ob: faceBox(det.landmarks.positions, lp, rp, 0.22, 0.05), lp, rp, outline: det.landmarks.getJawOutline(), closed: false, src: 'ear' };
   });
   updateTracks(faces, now);
-  if (withId) applyIdentity(dets, now);
+  if (recogReady && !idBusy && needsIdentity(performance.now())) await runIdentity();
 }
 
 /* Engine B (preferred): MediaPipe face mesh + blink blendshapes on every video frame (~30 fps).
@@ -824,12 +824,66 @@ async function runIdentity() {
   idBusy = true; const t0 = performance.now();
   try {
     const opts = new faceapi.TinyFaceDetectorOptions({ inputSize: idInputSize(), scoreThreshold: 0.45 });
-    const dets = await faceapi.detectAllFaces(video, opts).withFaceLandmarks().withFaceDescriptors();
-    applyIdentity(dets, performance.now()); engineOk();
+    // Close-up first: the blink engine already knows where the face is, so recognise a crop around it.
+    // The face then fills the picture: found reliably from further away, and the result matches enrollments.
+    let done = false;
+    const tr = pickIdentityTrack(performance.now());
+    if (tr && cropFace(tr)) {
+      const cd = await faceapi.detectAllFaces(idCanvas, opts).withFaceLandmarks().withFaceDescriptors();
+      if (cd.length) {
+        let big = cd[0]; for (const d of cd) if (d.detection.box.width > big.detection.box.width) big = d;
+        if (mode === 'enroll') { lastEnrollIdAt = performance.now(); pendingEnrollDescriptor = big.descriptor; }
+        identifyTrack(tr, big.descriptor, performance.now());
+        done = true;
+      }
+    }
+    if (!done) {   // no close-up result: fall back to the whole picture, as before
+      const dets = await faceapi.detectAllFaces(video, opts).withFaceLandmarks().withFaceDescriptors();
+      applyIdentity(dets, performance.now());
+    }
+    engineOk();
   } catch (e) { console.warn('Identity pass failed', e); engineFailed(e); }
   idCost = idCost * 0.7 + (performance.now() - t0) * 0.3;
   idNextAt = performance.now() + Math.min(600, idCost * 0.8);   // let the blink engine breathe between identity passes
   idBusy = false;
+}
+// the face that most needs identifying (unknown first, then the biggest)
+function pickIdentityTrack(t) {
+  let best = null;
+  for (const tr of tracks) {
+    if (!tr.target || t - tr.lastSeen > 300) continue;
+    const due = mode === 'enroll' || tr.name === null || (tr.name === 'Unknown' && t - tr.lastIdAt > (tr.unknownHits >= 3 ? 1200 : ID_RETRY_MS)) || t - tr.lastIdAt > ID_REVERIFY_MS;
+    if (!due) continue;
+    if (!best || (best.name !== null && tr.name === null) || ((best.name === null) === (tr.name === null) && tr.target.w > best.target.w)) best = tr;
+  }
+  return best;
+}
+const idCanvas = document.createElement('canvas'); idCanvas.width = idCanvas.height = ID_INPUT_SIZE;   // fixed size: no GPU recompiles
+const idCtx = idCanvas.getContext('2d', { willReadFrequently: false });
+function cropFace(tr) {
+  const g = tr.target; if (!g || !g.w || !video.videoWidth) return false;
+  const side = Math.max(g.w, g.h) * 1.8;
+  idCtx.fillStyle = '#808080'; idCtx.fillRect(0, 0, ID_INPUT_SIZE, ID_INPUT_SIZE);
+  // draw the visible part of the square around the face, keeping the scale the same at the picture edges
+  const sx = g.cx - side / 2, sy = g.cy - side / 2, k = ID_INPUT_SIZE / side;
+  const x0 = Math.max(0, sx), y0 = Math.max(0, sy), x1 = Math.min(video.videoWidth, sx + side), y1 = Math.min(video.videoHeight, sy + side);
+  if (x1 - x0 < 20 || y1 - y0 < 20) return false;
+  idCtx.drawImage(video, x0, y0, x1 - x0, y1 - y0, (x0 - sx) * k, (y0 - sy) * k, (x1 - x0) * k, (y1 - y0) * k);
+  return true;
+}
+// compare one face fingerprint with the roster and update that face's name
+function identifyTrack(tr, descriptor, t) {
+  let bestDist = Infinity, second = Infinity, cand = 'Unknown';
+  for (const e of enrollments) {
+    const d = faceapi.euclideanDistance(descriptor, e.descriptor);
+    if (d < bestDist) { second = bestDist; bestDist = d; cand = e.name; } else if (d < second) second = d;
+  }
+  const marginOk = (second - bestDist) >= MATCH_MARGIN || enrollments.length === 1;
+  if (bestDist > MATCH_DISTANCE_THRESHOLD || !marginOk) cand = 'Unknown';
+  // an identified face keeps its name through one bad re-check
+  if (cand === 'Unknown' && tr.name && tr.name !== 'Unknown' && tr.unknownHits < 1) { tr.unknownHits++; tr.lastIdAt = t; return; }
+  tr.unknownHits = cand === 'Unknown' ? tr.unknownHits + 1 : 0;
+  tr.name = cand; tr.lastIdAt = t;
 }
 function applyIdentity(dets, t) {
   if (mode === 'enroll') {
@@ -844,17 +898,7 @@ function applyIdentity(dets, t) {
     for (const c of tracks) { if (used.has(c)) continue; const d = Math.hypot(c.bx - bx, c.by - by); if (d < best) { best = d; tr = c; } }
     if (!tr) continue;
     used.add(tr);
-    let bestDist = Infinity, second = Infinity, cand = 'Unknown';
-    for (const e of enrollments) {
-      const d = faceapi.euclideanDistance(det.descriptor, e.descriptor);
-      if (d < bestDist) { second = bestDist; bestDist = d; cand = e.name; } else if (d < second) second = d;
-    }
-    const marginOk = (second - bestDist) >= MATCH_MARGIN || enrollments.length === 1;
-    if (bestDist > MATCH_DISTANCE_THRESHOLD || !marginOk) cand = 'Unknown';
-    // an identified face keeps its name through one bad re-check
-    if (cand === 'Unknown' && tr.name && tr.name !== 'Unknown' && tr.unknownHits < 1) { tr.unknownHits++; tr.lastIdAt = t; continue; }
-    tr.unknownHits = cand === 'Unknown' ? tr.unknownHits + 1 : 0;
-    tr.name = cand; tr.lastIdAt = t;
+    identifyTrack(tr, det.descriptor, t);
   }
 }
 
@@ -1412,6 +1456,7 @@ async function warmDetector() {
 }
 async function warmIdentity() {
   await timeout(50);
+  if (engine === 'faceapi') { try { await faceapi.detectAllFaces(blankCanvas(320), new faceapi.TinyFaceDetectorOptions({ inputSize: 320, scoreThreshold: 0.5 })); } catch (e) {} await timeout(30); }
   try { await faceapi.detectAllFaces(blankCanvas(ID_INPUT_SIZE), new faceapi.TinyFaceDetectorOptions({ inputSize: ID_INPUT_SIZE, scoreThreshold: 0.45 })); } catch (e) {}
   await timeout(30);
   try { await faceapi.detectFaceLandmarks(blankCanvas(112)); } catch (e) {}
