@@ -10,7 +10,7 @@
 <meta name="apple-mobile-web-app-capable" content="yes">
 <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
 <meta name="apple-mobile-web-app-title" content="CAIPSD Attendance">
-<meta http-equiv="Content-Security-Policy" content="default-src 'none'; manifest-src 'self'; script-src 'sha256-SOY9Tb/Slrkve7p9kDWyPCaOutP3/2ly5ku9J4lemg0=' https://cdn.jsdelivr.net/npm/face-api.js@0.22.2/ https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@0.10.14/ 'wasm-unsafe-eval'; style-src 'unsafe-inline' https://fonts.googleapis.com; font-src https://fonts.gstatic.com; img-src 'self' data: blob:; media-src 'self' blob:; connect-src https://cdn.jsdelivr.net/npm/@vladmandic/face-api@1.7.13/model/ https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@0.10.14/ https://storage.googleapis.com/mediapipe-models/face_landmarker/ https://script.google.com/macros/s/ https://script.googleusercontent.com data: blob:; worker-src 'self' blob: https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@0.10.14/; base-uri 'none'; form-action 'none'; object-src 'none'">
+<meta http-equiv="Content-Security-Policy" content="default-src 'none'; manifest-src 'self'; script-src 'sha256-tEPSqjprIKieAPm76UvpKCPoXBHhOa2xWyc5hwf6R1s=' https://cdn.jsdelivr.net/npm/face-api.js@0.22.2/ https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@0.10.14/ 'wasm-unsafe-eval'; style-src 'unsafe-inline' https://fonts.googleapis.com; font-src https://fonts.gstatic.com; img-src 'self' data: blob:; media-src 'self' blob:; connect-src https://cdn.jsdelivr.net/npm/@vladmandic/face-api@1.7.13/model/ https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@0.10.14/ https://storage.googleapis.com/mediapipe-models/face_landmarker/ https://script.google.com/macros/s/ https://script.googleusercontent.com data: blob:; worker-src 'self' blob: https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@0.10.14/; base-uri 'none'; form-action 'none'; object-src 'none'">
 <meta name="referrer" content="no-referrer">
 <meta name="robots" content="noindex, nofollow">
 <title>CAIPSD Attendance</title>
@@ -230,6 +230,8 @@
   .btn-danger:hover { background: rgba(255,224,224,.9); }
   .btn-block { width: 100%; }
   .btn-sm { min-height: 38px; padding: 0 14px; font-size: 13px; border-radius: 12px; }
+  input[type=password] { width: 100%; min-height: 46px; padding: 0 14px; border-radius: 14px; border: 1.5px solid rgba(13,26,54,.12); background: rgba(255,255,255,.62); color: var(--ink); font-size: 16px; }
+  input[type=password]:focus { outline: none; border-color: var(--brand-2); box-shadow: 0 0 0 3px rgba(29,82,194,.18); }
   input[type=text] { width: 100%; min-height: 46px; padding: 0 14px; border-radius: 14px; border: 1.5px solid rgba(13,26,54,.12); background: rgba(255,255,255,.62); color: var(--ink); font-size: 16px; transition: border-color .2s, background .2s, box-shadow .2s; }
   input:focus { outline: none; border-color: var(--navy-600); background: #fff; box-shadow: 0 0 0 4px rgba(31,75,158,.14); }
 
@@ -241,6 +243,14 @@
   .row input { flex: 1; min-width: 130px; }
   .enrolled { margin-top: 20px; padding-top: 18px; border-top: 1px solid var(--line); }
   .enrolled h3 { margin: 0 0 12px; font-size: 15px; font-weight: 800; }
+  .backup { margin-top: 20px; padding-top: 18px; border-top: 1px solid var(--line); }
+  .backup-head { display: flex; align-items: center; justify-content: space-between; gap: 10px; flex-wrap: wrap; }
+  .backup-head h3 { margin: 0; font-size: 15px; font-weight: 800; }
+  .bk-note { margin: 8px 0 0; color: var(--ink-soft); font-size: 12.5px; line-height: 1.5; }
+  .backup .row .btn { flex: 1; min-width: 150px; }
+  .pill.warn { background: rgba(212,140,20,.14); color: #9A5B00; }
+  .pill.ok { background: rgba(23,145,95,.12); color: var(--ok); }
+  .btn[disabled] { opacity: .6; cursor: progress; }
   .enrolled-item { display: flex; align-items: center; justify-content: space-between; gap: 10px; padding: 9px 10px 9px 12px; border: 1px solid rgba(255,255,255,.8); border-radius: 16px; background: rgba(255,255,255,.5); margin-bottom: 8px; font-size: 14px; font-weight: 600; }
   .who { display: flex; align-items: center; gap: 10px; min-width: 0; }
   .wname { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
@@ -454,6 +464,19 @@
         <div class="enrolled">
           <h3>Enrolled profiles</h3>
           <div id="enrolledList"></div>
+        </div>
+        <div class="backup">
+          <div class="backup-head"><h3>Backup &amp; restore</h3><span class="pill" id="backupState"></span></div>
+          <p class="bk-note">Saves every enrolled face in one password-protected file. Keep the file in your Google Drive or on a USB stick. Use a password of 8+ characters and don't forget it: without it the file can't be opened. To restore, type the password in the first box only.</p>
+          <div class="row">
+            <input type="password" id="bkPass" placeholder="Backup password" autocomplete="new-password" maxlength="128">
+            <input type="password" id="bkPass2" placeholder="Repeat password" autocomplete="new-password" maxlength="128">
+          </div>
+          <div class="row">
+            <button class="btn btn-primary" id="btnBackup" type="button">Download backup</button>
+            <button class="btn btn-ghost" id="btnRestore" type="button">Restore from file</button>
+            <input type="file" id="bkFile" accept=".caipsd,application/json" hidden>
+          </div>
         </div>
       </div>
     </section>
@@ -1265,7 +1288,84 @@ async function deleteEnrollment(id) {
   tracks.forEach(t => { t.name = null; });
   renderEnrolledList(); renderLog(); await persist();
 }
+/* ---------- backup & restore of enrolled faces (password-protected file, nothing leaves the device otherwise) ---------- */
+const BK_KEY = 'caipsd2_lastBackup', BK_ITER = 310000, BK_AAD = enc.encode('caipsd-faces-v1');
+function lastBackup() { try { return JSON.parse(localStorage.getItem(BK_KEY)) || null; } catch (e) { return null; } }
+function renderBackupState() {
+  const el = $('backupState'); if (!el) return;
+  const lb = lastBackup(), saved = new Set(lb && Array.isArray(lb.ids) ? lb.ids : []);
+  const fresh = enrollments.filter(e => !saved.has(e.id)).length;
+  if (!enrollments.length) { el.textContent = 'Nothing to back up yet'; el.className = 'pill'; }
+  else if (!lb) { el.textContent = 'Never backed up'; el.className = 'pill warn'; }
+  else if (fresh) { el.textContent = `${fresh} new since last backup`; el.className = 'pill warn'; }
+  else { el.textContent = 'Backed up ' + new Date(lb.at).toLocaleDateString('en-GB', { day: 'numeric', month: 'short' }); el.className = 'pill ok'; }
+}
+async function backupKey(pass, salt, iter) {
+  const base = await crypto.subtle.importKey('raw', enc.encode(pass), 'PBKDF2', false, ['deriveKey']);
+  return crypto.subtle.deriveKey({ name: 'PBKDF2', salt, iterations: iter, hash: 'SHA-256' }, base, { name: 'AES-GCM', length: 256 }, false, ['encrypt', 'decrypt']);
+}
+function bkBusy(on) { $('btnBackup').disabled = on; $('btnRestore').disabled = on; }
+async function backupFaces() {
+  const p = $('bkPass').value, p2 = $('bkPass2').value;
+  if (!enrollments.length) return setStatus('No enrolled faces to back up yet.', 'err', 3500);
+  if (p.length < 8) return setStatus('Use a backup password of at least 8 characters.', 'err', 4500);
+  if (p !== p2) return setStatus('The two passwords don’t match. Type them again.', 'err', 4500);
+  bkBusy(true);
+  try {
+    const salt = crypto.getRandomValues(new Uint8Array(16)), iv = crypto.getRandomValues(new Uint8Array(12));
+    const key = await backupKey(p, salt, BK_ITER);
+    const body = { created: new Date().toISOString(), enrollments: enrollments.map(x => ({ id: x.id, name: x.name, section: x.section, descriptor: Array.from(x.descriptor) })) };
+    const ct = await crypto.subtle.encrypt({ name: 'AES-GCM', iv, additionalData: BK_AAD }, key, enc.encode(JSON.stringify(body)));
+    const file = JSON.stringify({ app: 'caipsd-faces', v: 1, kdf: 'PBKDF2-SHA256', iter: BK_ITER, salt: toB64(salt), iv: toB64(iv), count: enrollments.length, data: toB64(ct) });
+    const d = new Date(), stamp = `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`;
+    const url = URL.createObjectURL(new Blob([file], { type: 'application/octet-stream' }));
+    const a = document.createElement('a'); a.href = url; a.download = `CAIPSD-faces-${stamp}.caipsd`; document.body.appendChild(a); a.click(); a.remove();
+    setTimeout(() => URL.revokeObjectURL(url), 10000);
+    try { localStorage.setItem(BK_KEY, JSON.stringify({ at: Date.now(), ids: enrollments.map(e => e.id) })); } catch (e) {}
+    $('bkPass').value = ''; $('bkPass2').value = '';
+    renderBackupState();
+    setStatus(`✓ Backup of ${enrollments.length} face${enrollments.length === 1 ? '' : 's'} downloaded. Keep the file and the password safe.`, 'ok', 6000);
+  } catch (e) { console.error(e); setStatus('Backup failed: ' + e.message, 'err', 5000); }
+  bkBusy(false);
+}
+function startRestore() {
+  if (!$('bkPass').value) { setStatus('Type the backup password first, then choose the file.', 'err', 4500); $('bkPass').focus(); return; }
+  $('bkFile').value = ''; $('bkFile').click();
+}
+async function restoreFaces(file) {
+  if (!file) return;
+  const p = $('bkPass').value;
+  bkBusy(true);
+  try {
+    if (file.size > 25 * 1024 * 1024) throw new Error('This file is too big to be a CAIPSD backup.');
+    let f; try { f = JSON.parse(await file.text()); } catch (e) { throw new Error('This is not a CAIPSD backup file.'); }
+    if (!f || f.app !== 'caipsd-faces' || f.v !== 1 || typeof f.data !== 'string' || typeof f.salt !== 'string' || typeof f.iv !== 'string') throw new Error('This is not a CAIPSD backup file.');
+    const iter = Number.isInteger(f.iter) && f.iter >= 100000 && f.iter <= 5000000 ? f.iter : BK_ITER;
+    const key = await backupKey(p, fromB64(f.salt), iter);
+    let body;
+    try { body = JSON.parse(dec.decode(await crypto.subtle.decrypt({ name: 'AES-GCM', iv: fromB64(f.iv), additionalData: BK_AAD }, key, fromB64(f.data)))); }
+    catch (e) { throw new Error('Wrong password, or the file is damaged.'); }
+    const list = sanitizeEnrollments(body && body.enrollments);
+    if (!list.length) throw new Error('The backup has no faces in it.');
+    let added = 0, updated = 0, skipped = 0;
+    for (const r of list) {
+      const i = enrollments.findIndex(e => e.id === r.id || e.name.toLowerCase() === r.name.toLowerCase());
+      if (i >= 0) { enrollments[i] = { ...r, id: enrollments[i].id }; updated++; }
+      else if (enrollments.length < MAX_ENROLLED) { enrollments.push(r); added++; }
+      else skipped++;
+    }
+    tracks.forEach(t => { t.name = null; });
+    await persist();
+    try { const lb = lastBackup(), ids = new Set(lb && Array.isArray(lb.ids) ? lb.ids : []); list.forEach(r => ids.add(r.id)); enrollments.forEach(e => { if (list.some(r => r.name.toLowerCase() === e.name.toLowerCase())) ids.add(e.id); }); localStorage.setItem(BK_KEY, JSON.stringify({ at: lb ? lb.at : Date.now(), ids: [...ids] })); } catch (e) {}
+    $('bkPass').value = ''; $('bkPass2').value = '';
+    renderEnrolledList(); renderLog();
+    setStatus(`✓ Restored ${list.length} face${list.length === 1 ? '' : 's'}: ${added} added, ${updated} updated` + (skipped ? `, ${skipped} skipped (roster full)` : '') + '.', 'ok', 6000);
+  } catch (e) { setStatus(e.message || 'Restore failed.', 'err', 6000); }
+  bkBusy(false);
+}
+
 function renderEnrolledList() {
+  renderBackupState();
   const box = $('enrolledList'); box.replaceChildren();
   if (!enrollments.length) { box.appendChild(h('div', { class: 'empty', text: 'No one enrolled yet. Capture a face to add the first student.' })); return; }
   for (const e of enrollments) {
@@ -1478,6 +1578,9 @@ $('btnFlip').addEventListener('click', flipCamera);
 $('btnCapture').addEventListener('click', captureEnrollment);
 $('btnSaveEnroll').addEventListener('click', saveEnrollmentName);
 $('btnCancelEnroll').addEventListener('click', cancelEnrollment);
+$('btnBackup').addEventListener('click', backupFaces);
+$('btnRestore').addEventListener('click', startRestore);
+$('bkFile').addEventListener('change', (e) => restoreFaces(e.target.files && e.target.files[0]));
 $('enrollName').addEventListener('keydown', e => { if (e.key === 'Enter') $('enrollSection').focus(); });
 $('enrollSection').addEventListener('keydown', e => { if (e.key === 'Enter') saveEnrollmentName(); });
 $('btnExport').addEventListener('click', exportCSV);
