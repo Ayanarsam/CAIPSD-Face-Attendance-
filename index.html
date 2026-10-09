@@ -10,7 +10,7 @@
 <meta name="apple-mobile-web-app-capable" content="yes">
 <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
 <meta name="apple-mobile-web-app-title" content="CAIPSD Attendance">
-<meta http-equiv="Content-Security-Policy" content="default-src 'none'; manifest-src 'self'; script-src 'sha256-/LbxQUM19cC80sZOdVc2RXji2r2lsW1YQmF2tStIZsg=' https://cdn.jsdelivr.net/npm/face-api.js@0.22.2/ https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@0.10.14/ 'wasm-unsafe-eval'; style-src 'unsafe-inline' https://fonts.googleapis.com; font-src https://fonts.gstatic.com; img-src 'self' data: blob:; media-src 'self' blob:; connect-src https://cdn.jsdelivr.net/npm/@vladmandic/face-api@1.7.13/model/ https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@0.10.14/ https://storage.googleapis.com/mediapipe-models/face_landmarker/ https://script.google.com/macros/s/ https://script.googleusercontent.com data: blob:; worker-src 'self' blob: https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@0.10.14/; base-uri 'none'; form-action 'none'; object-src 'none'">
+<meta http-equiv="Content-Security-Policy" content="default-src 'none'; manifest-src 'self'; script-src 'sha256-eGtIPeQlwPVIHam5g0sWqAI7C4wRFoh4VOemYUx/1TI=' https://cdn.jsdelivr.net/npm/face-api.js@0.22.2/ https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@0.10.14/ 'wasm-unsafe-eval'; style-src 'unsafe-inline' https://fonts.googleapis.com; font-src https://fonts.gstatic.com; img-src 'self' data: blob:; media-src 'self' blob:; connect-src https://cdn.jsdelivr.net/npm/@vladmandic/face-api@1.7.13/model/ https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@0.10.14/ https://storage.googleapis.com/mediapipe-models/face_landmarker/ https://script.google.com/macros/s/ https://script.googleusercontent.com data: blob:; worker-src 'self' blob: https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@0.10.14/; base-uri 'none'; form-action 'none'; object-src 'none'">
 <meta name="referrer" content="no-referrer">
 <meta name="robots" content="noindex, nofollow">
 <title>CAIPSD Attendance</title>
@@ -236,6 +236,18 @@
   /* Enroll */
   .enroll { margin-top: 14px; }
   .enroll:not(.hidden), #nameSection:not(.hidden) { animation: rise .4s var(--ease); }
+  .pin-veil { position: fixed; inset: 0; z-index: 80; display: flex; align-items: center; justify-content: center; padding: 16px; background: rgba(6,16,44,.55); }
+  .pin-veil[hidden] { display: none; }
+  .pin-card { width: min(340px, 100%); padding: 22px 20px 18px; border-radius: 22px; background: #fff; color: var(--ink); box-shadow: 0 30px 70px -20px rgba(2,10,40,.6); text-align: center; }
+  .pin-card h3 { margin: 0 0 6px; font-size: 18px; font-weight: 800; }
+  .pin-card p { margin: 0 0 14px; font-size: 13px; line-height: 1.45; color: var(--ink-soft); }
+  .pin-card input { width: 100%; box-sizing: border-box; min-height: 50px; margin-bottom: 10px; border-radius: 14px; border: 1px solid rgba(11,43,110,.25); text-align: center; font: inherit; font-size: 24px; letter-spacing: .4em; }
+  .pin-card input::placeholder { letter-spacing: normal; font-size: 15px; }
+  .pin-card input:focus { outline: 2px solid var(--brand); outline-offset: 1px; }
+  .pin-msg { min-height: 18px; margin: 0 0 10px; font-size: 13px; font-weight: 700; color: #b42318; }
+  .pin-card .row { display: flex; gap: 8px; }
+  .pin-card .row .btn { flex: 1; }
+  .pin-change { display: block; margin: 12px auto 0; padding: 6px 10px; border: none; background: none; color: var(--ink-soft); font: inherit; font-size: 12.5px; font-weight: 700; text-decoration: underline; cursor: pointer; }
   .hint { text-align: center; color: var(--ink-soft); font-size: 12.5px; margin: 10px 0 0; line-height: 1.5; }
   .row { display: flex; gap: 8px; margin-top: 12px; flex-wrap: wrap; }
   .row input { flex: 1; min-width: 130px; }
@@ -410,6 +422,16 @@
       </div>
     </div>
   </header>
+  <div class="pin-veil" id="pinVeil" hidden role="dialog" aria-modal="true" aria-labelledby="pinTitle">
+    <form class="pin-card" id="pinForm" autocomplete="off">
+      <h3 id="pinTitle">Enter passcode</h3>
+      <p id="pinText">Enrolling students needs the passcode.</p>
+      <input type="password" id="pinInput" inputmode="numeric" pattern="[0-9]*" maxlength="12" autocomplete="off" aria-label="Passcode">
+      <input type="password" id="pinInput2" inputmode="numeric" pattern="[0-9]*" maxlength="12" autocomplete="off" aria-label="Repeat passcode" placeholder="Repeat" hidden>
+      <div class="pin-msg" id="pinMsg" aria-live="polite"></div>
+      <div class="row"><button type="button" class="btn btn-ghost" id="pinCancel">Cancel</button><button type="submit" class="btn btn-primary" id="pinOk">Unlock</button></div>
+    </form>
+  </div>
 
   <main class="shell">
     <!-- Camera card -->
@@ -455,6 +477,7 @@
           <h3>Enrolled profiles</h3>
           <div id="enrolledList"></div>
         </div>
+        <button type="button" class="pin-change" id="btnChangePin">Change enrollment passcode</button>
       </div>
     </section>
 
@@ -1442,7 +1465,7 @@ function setMode(m) {
   $('tabRecognize').classList.toggle('active', m !== 'enroll');
   $('tabEnroll').classList.toggle('active', m === 'enroll');
   $('enrollControls').classList.toggle('hidden', m !== 'enroll');
-  if (m !== 'enroll') cancelEnrollment();
+  if (m !== 'enroll') { cancelEnrollment(); clearTimeout(enrollIdleTimer); }
   tracks = []; stepsKey = ''; statusHoldUntil = 0; frameState = ''; frameFace = null;
 }
 
@@ -1527,8 +1550,77 @@ async function init() {
   perfFrom = performance.now() + 6000;   // ignore start-up warm-up when judging speed
 }
 
+/* ---------- enrollment passcode ----------
+   Enrolling (and deleting) students needs a passcode. It is created on this device the first time someone opens
+   "Enroll student" and stored only as a salted PBKDF2 hash. The enroll screen locks again when you leave it
+   or after 3 minutes without use. */
+const PIN_KEY = 'caipsd_enroll_pin', ENROLL_IDLE_MS = 3 * 60 * 1000;
+let pinFails = 0, pinLockedUntil = 0, enrollIdleTimer = 0;
+function loadPin() { try { const v = JSON.parse(localStorage.getItem(PIN_KEY) || 'null'); return v && v.salt && v.hash ? v : null; } catch (e) { return null; } }
+async function hashPin(pin, saltB64) {
+  const base = await crypto.subtle.importKey('raw', enc.encode(pin), 'PBKDF2', false, ['deriveBits']);
+  const bits = await crypto.subtle.deriveBits({ name: 'PBKDF2', hash: 'SHA-256', salt: fromB64(saltB64), iterations: 150000 }, base, 256);
+  return toB64(bits);
+}
+async function savePin(pin) {
+  const salt = toB64(crypto.getRandomValues(new Uint8Array(16)));
+  localStorage.setItem(PIN_KEY, JSON.stringify({ salt, hash: await hashPin(pin, salt) }));
+}
+async function pinMatches(pin) {
+  const v = loadPin(); if (!v) return false;
+  const got = await hashPin(pin, v.salt);
+  let diff = got.length ^ v.hash.length; for (let i = 0; i < got.length && i < v.hash.length; i++) diff |= got.charCodeAt(i) ^ v.hash.charCodeAt(i);
+  return diff === 0;
+}
+function touchEnroll() {
+  clearTimeout(enrollIdleTimer);
+  if (mode === 'enroll') enrollIdleTimer = setTimeout(() => { if (mode === 'enroll') { setMode('recognize'); setStatus('Enroll screen locked.', 'wait', 2500); } }, ENROLL_IDLE_MS);
+}
+['pointerdown', 'keydown'].forEach(ev => document.addEventListener(ev, () => { if (mode === 'enroll') touchEnroll(); }, { passive: true }));
+// kind: 'unlock' (create the passcode first if there is none) or 'change'
+function askPin(kind) {
+  return new Promise(resolve => {
+    const veil = $('pinVeil'), inp = $('pinInput'), inp2 = $('pinInput2'), msg = $('pinMsg');
+    let step = loadPin() ? (kind === 'change' ? 'old' : 'check') : 'new', firstNew = '';
+    const show = () => {
+      const t = { check: ['Enter passcode', 'Enrolling students needs the passcode.', 'Unlock'],
+                  old: ['Change passcode', 'Enter the current passcode first.', 'Next'],
+                  new: [loadPin() ? 'New passcode' : 'Create a passcode', 'Choose a 4–12 digit passcode. It will be needed every time someone enrolls or deletes a student on this device.', 'Save'] }[step];
+      $('pinTitle').textContent = t[0]; $('pinText').textContent = t[1]; $('pinOk').textContent = t[2];
+      inp.value = ''; inp2.value = ''; inp2.hidden = step !== 'new'; inp.placeholder = step === 'new' ? 'New passcode' : '';
+      veil.hidden = false; setTimeout(() => inp.focus(), 30);
+    };
+    const finish = (ok) => { veil.hidden = true; msg.textContent = ''; $('pinForm').onsubmit = null; $('pinCancel').onclick = null; resolve(ok); };
+    $('pinCancel').onclick = () => finish(false);
+    $('pinForm').onsubmit = async (e) => {
+      e.preventDefault();
+      const pin = inp.value.trim();
+      if (step === 'new') {
+        if (!/^\d{4,12}$/.test(pin)) { msg.textContent = 'Use 4 to 12 digits.'; return; }
+        if (inp2.value.trim() !== pin) { msg.textContent = "The two passcodes don't match."; inp2.value = ''; inp2.focus(); return; }
+        try { await savePin(pin); } catch (er) { msg.textContent = 'Could not save the passcode.'; return; }
+        setStatus(kind === 'change' ? 'Passcode changed.' : 'Passcode saved.', 'ok', 2000);
+        finish(true); return;
+      }
+      const now = Date.now();
+      if (now < pinLockedUntil) { msg.textContent = `Too many tries. Wait ${Math.ceil((pinLockedUntil - now) / 1000)} s.`; return; }
+      if (!(await pinMatches(pin))) {
+        pinFails++; inp.value = '';
+        if (pinFails >= 5) { pinFails = 0; pinLockedUntil = Date.now() + 60000; msg.textContent = 'Too many tries. Wait 1 minute.'; }
+        else msg.textContent = 'Wrong passcode.';
+        return;
+      }
+      pinFails = 0; msg.textContent = '';
+      if (step === 'old') { step = 'new'; show(); return; }
+      finish(true);
+    };
+    msg.textContent = ''; show();
+  });
+}
+
 $('tabRecognize').addEventListener('click', () => setMode('recognize'));
-$('tabEnroll').addEventListener('click', () => setMode('enroll'));
+$('tabEnroll').addEventListener('click', () => { if (mode !== 'enroll') askPin('unlock').then(ok => { if (ok) { setMode('enroll'); touchEnroll(); } }); });
+$('btnChangePin').addEventListener('click', () => askPin('change'));
 $('btnFlip').addEventListener('click', flipCamera);
 $('btnCapture').addEventListener('click', captureEnrollment);
 $('btnSaveEnroll').addEventListener('click', saveEnrollmentName);
