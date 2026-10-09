@@ -1,0 +1,24 @@
+name: Check
+
+# Runs the code checker and the browser tests on every change.
+# A red ✗ on a commit or pull request means something broke: don't merge it into main (main is the live site).
+on:
+  push:
+  pull_request:
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: npm
+      - run: npm ci
+      - run: npx playwright install --with-deps chromium
+      - name: Code checker
+        run: npm run lint
+      - name: Browser tests
+        run: npm test

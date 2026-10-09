@@ -1,0 +1,19 @@
+{
+  "name": "caipsd-attendance",
+  "version": "2.0.0",
+  "private": true,
+  "description": "CAIPSD Attendance: face and blink attendance web app",
+  "scripts": {
+    "lint": "node tests/lint.mjs",
+    "test": "node tests/run.mjs",
+    "check": "npm run lint && npm test",
+    "release": "node tools/release.mjs"
+  },
+  "devDependencies": {
+    "@vladmandic/face-api": "1.7.13",
+    "eslint": "8.57.1",
+    "face-api.js": "0.22.2",
+    "playwright": "1.64.0",
+    "pngjs": "7.0.0"
+  }
+}
