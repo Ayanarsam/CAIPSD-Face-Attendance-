@@ -10,7 +10,7 @@
 <meta name="apple-mobile-web-app-capable" content="yes">
 <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
 <meta name="apple-mobile-web-app-title" content="CAIPSD Attendance">
-<meta http-equiv="Content-Security-Policy" content="default-src 'none'; manifest-src 'self'; script-src 'sha256-1gLUquCsgwkK7FeXg2yNbgDf2DZQH7NQkw4B8JSHp80=' https://cdn.jsdelivr.net/npm/face-api.js@0.22.2/ https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@0.10.14/ 'wasm-unsafe-eval'; style-src 'unsafe-inline' https://fonts.googleapis.com; font-src https://fonts.gstatic.com; img-src 'self' data: blob:; media-src 'self' blob:; connect-src https://cdn.jsdelivr.net/npm/@vladmandic/face-api@1.7.13/model/ https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@0.10.14/ https://storage.googleapis.com/mediapipe-models/face_landmarker/ https://script.google.com/macros/s/ https://script.googleusercontent.com data: blob:; worker-src 'self' blob: https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@0.10.14/; base-uri 'none'; form-action 'none'; object-src 'none'">
+<meta http-equiv="Content-Security-Policy" content="default-src 'none'; manifest-src 'self'; script-src 'sha256-foxyoF8pY08Ms0ubo2SlCW5P7145XXCOiLABllp5rqA=' https://cdn.jsdelivr.net/npm/face-api.js@0.22.2/ https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@0.10.14/ 'wasm-unsafe-eval'; style-src 'unsafe-inline' https://fonts.googleapis.com; font-src https://fonts.gstatic.com; img-src 'self' data: blob:; media-src 'self' blob:; connect-src https://cdn.jsdelivr.net/npm/@vladmandic/face-api@1.7.13/model/ https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@0.10.14/ https://storage.googleapis.com/mediapipe-models/face_landmarker/ https://script.google.com/macros/s/ https://script.googleusercontent.com data: blob:; worker-src 'self' blob: https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@0.10.14/; base-uri 'none'; form-action 'none'; object-src 'none'">
 <meta name="referrer" content="no-referrer">
 <meta name="robots" content="noindex, nofollow">
 <title>CAIPSD Attendance</title>
@@ -1450,6 +1450,7 @@ function renderLog() {
   highlightTs = 0;
 }
 async function clearRecords() {
+  if (!(await askPin('clear'))) return;   // same passcode as enrolling
   if (!confirm('Delete ALL attendance records on this device? This cannot be undone.')) return;
   records = []; presentCache.key = ''; streakCache.key = ''; renderLog(); await Promise.all([persist(), clearPhotos()]);
 }
@@ -1578,13 +1579,14 @@ function touchEnroll() {
   if (mode === 'enroll') enrollIdleTimer = setTimeout(() => { if (mode === 'enroll') { setMode('recognize'); setStatus('Enroll screen locked.', 'wait', 2500); } }, ENROLL_IDLE_MS);
 }
 ['pointerdown', 'keydown'].forEach(ev => document.addEventListener(ev, () => { if (mode === 'enroll') touchEnroll(); }, { passive: true }));
-// kind: 'unlock' (create the passcode first if there is none) or 'change'
+// kind: 'unlock' (enroll screen), 'clear' (Clear all records) or 'change'
 function askPin(kind) {
   return new Promise(resolve => {
     const veil = $('pinVeil'), inp = $('pinInput'), inp2 = $('pinInput2'), msg = $('pinMsg');
     let step = loadPin() ? (kind === 'change' ? 'old' : 'check') : 'new', firstNew = '';
     const show = () => {
-      const t = { check: ['Enter passcode', 'Enrolling students needs the passcode.', 'Unlock'],
+      const t = { check: kind === 'clear' ? ['Enter passcode', 'Clearing all attendance records needs the passcode.', 'Continue']
+                                          : ['Enter passcode', 'Enrolling students needs the passcode.', 'Unlock'],
                   old: ['Change passcode', 'Enter the current passcode first.', 'Next'],
                   new: ['New passcode', 'Choose a 4–12 digit passcode. It will be needed every time someone enrolls or deletes a student on this device.', 'Save'] }[step];
       $('pinTitle').textContent = t[0]; $('pinText').textContent = t[1]; $('pinOk').textContent = t[2];
