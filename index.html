@@ -10,7 +10,7 @@
 <meta name="apple-mobile-web-app-capable" content="yes">
 <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
 <meta name="apple-mobile-web-app-title" content="CAIPSD Attendance">
-<meta http-equiv="Content-Security-Policy" content="default-src 'none'; manifest-src 'self'; script-src 'sha256-NVSP5j7+AI3weVlBJwikkATBxYUXHHsII7fZqErEWUA=' https://cdn.jsdelivr.net/npm/face-api.js@0.22.2/ https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@0.10.14/ 'wasm-unsafe-eval'; style-src 'unsafe-inline' https://fonts.googleapis.com; font-src https://fonts.gstatic.com; img-src 'self' data: blob:; media-src 'self' blob:; connect-src https://cdn.jsdelivr.net/npm/@vladmandic/face-api@1.7.13/model/ https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@0.10.14/ https://storage.googleapis.com/mediapipe-models/face_landmarker/ https://script.google.com/macros/s/ https://script.googleusercontent.com data: blob:; worker-src 'self' blob: https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@0.10.14/; base-uri 'none'; form-action 'none'; object-src 'none'">
+<meta http-equiv="Content-Security-Policy" content="default-src 'none'; manifest-src 'self'; script-src 'sha256-1gLUquCsgwkK7FeXg2yNbgDf2DZQH7NQkw4B8JSHp80=' https://cdn.jsdelivr.net/npm/face-api.js@0.22.2/ https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@0.10.14/ 'wasm-unsafe-eval'; style-src 'unsafe-inline' https://fonts.googleapis.com; font-src https://fonts.gstatic.com; img-src 'self' data: blob:; media-src 'self' blob:; connect-src https://cdn.jsdelivr.net/npm/@vladmandic/face-api@1.7.13/model/ https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@0.10.14/ https://storage.googleapis.com/mediapipe-models/face_landmarker/ https://script.google.com/macros/s/ https://script.googleusercontent.com data: blob:; worker-src 'self' blob: https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@0.10.14/; base-uri 'none'; form-action 'none'; object-src 'none'">
 <meta name="referrer" content="no-referrer">
 <meta name="robots" content="noindex, nofollow">
 <title>CAIPSD Attendance</title>
@@ -1683,8 +1683,14 @@ if ('serviceWorker' in navigator && location.protocol === 'https:') {
   navigator.serviceWorker.addEventListener('controllerchange', () => { if (hadController) reloadWhenFree(); });
   navigator.serviceWorker.addEventListener('message', (e) => { if (e.data && e.data.type === 'page-updated') reloadWhenFree(); });
   window.addEventListener('load', () => navigator.serviceWorker.register('sw.js', { updateViaCache: 'none' }).then(reg => {
-    setInterval(() => reg.update().catch(() => {}), 15 * 60 * 1000);
-    document.addEventListener('visibilitychange', () => { if (!document.hidden) reg.update().catch(() => {}); });
+    // reg.update() only notices a changed sw.js; the page itself is checked by the service worker
+    const checkForUpdate = () => {
+      reg.update().catch(() => {});
+      if (navigator.serviceWorker.controller && navigator.onLine) navigator.serviceWorker.controller.postMessage({ type: 'check-update' });
+    };
+    setInterval(checkForUpdate, 15 * 60 * 1000);
+    document.addEventListener('visibilitychange', () => { if (!document.hidden) checkForUpdate(); });
+    window.addEventListener('online', checkForUpdate);
   }).catch(e => console.warn('Offline cache unavailable', e)));
 }
 // reload only when nobody is checking in, enrolling or typing (and the newest check-in has been saved)
