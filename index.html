@@ -10,7 +10,7 @@
 <meta name="apple-mobile-web-app-capable" content="yes">
 <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
 <meta name="apple-mobile-web-app-title" content="CAIPSD Attendance">
-<meta http-equiv="Content-Security-Policy" content="default-src 'none'; manifest-src 'self'; script-src 'sha256-e88iQrUcrHrCq3v+g7N1Yjand5MI0gS5WJ+gzCVCFPY=' https://cdn.jsdelivr.net/npm/face-api.js@0.22.2/ https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@0.10.14/ 'wasm-unsafe-eval'; style-src 'unsafe-inline' https://fonts.googleapis.com; font-src https://fonts.gstatic.com; img-src 'self' data: blob:; media-src 'self' blob:; connect-src https://cdn.jsdelivr.net/npm/@vladmandic/face-api@1.7.13/model/ https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@0.10.14/ https://storage.googleapis.com/mediapipe-models/face_landmarker/ https://script.google.com/macros/s/ https://script.googleusercontent.com data: blob:; worker-src 'self' blob: https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@0.10.14/; base-uri 'none'; form-action 'none'; object-src 'none'">
+<meta http-equiv="Content-Security-Policy" content="default-src 'none'; manifest-src 'self'; script-src 'sha256-wGGuoHRwtGZNR7ptokCPEZ589MHdLXks5jeT/EzrQlk=' https://cdn.jsdelivr.net/npm/face-api.js@0.22.2/ https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@0.10.14/ 'wasm-unsafe-eval'; style-src 'unsafe-inline' https://fonts.googleapis.com; font-src https://fonts.gstatic.com; img-src 'self' data: blob:; media-src 'self' blob:; connect-src https://cdn.jsdelivr.net/npm/@vladmandic/face-api@1.7.13/model/ https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@0.10.14/ https://storage.googleapis.com/mediapipe-models/face_landmarker/ https://script.google.com/macros/s/ https://script.googleusercontent.com data: blob:; worker-src 'self' blob: https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@0.10.14/; base-uri 'none'; form-action 'none'; object-src 'none'">
 <meta name="referrer" content="no-referrer">
 <meta name="robots" content="noindex, nofollow">
 <title>CAIPSD Attendance</title>
@@ -253,13 +253,6 @@
   .row input { flex: 1; min-width: 130px; }
   .enrolled { margin-top: 20px; padding-top: 18px; border-top: 1px solid var(--line); }
   .enrolled h3 { margin: 0 0 12px; font-size: 15px; font-weight: 800; }
-  .backup { margin-top: 18px; padding-top: 16px; border-top: 1px solid var(--line); }
-  .backup h3 { margin: 0 0 6px; font-size: 15px; font-weight: 800; }
-  .backup p { margin: 0; font-size: 12.5px; line-height: 1.5; color: var(--ink-soft); }
-  .backup p.warn { color: #9A5B00; font-weight: 700; }
-  .backup .row { display: flex; gap: 8px; margin-top: 10px; }
-  .backup .row .btn { flex: 1; }
-  .pin-card input.pw { font-size: 17px; letter-spacing: .06em; }
   .enrolled-item { display: flex; align-items: center; justify-content: space-between; gap: 10px; padding: 9px 10px 9px 12px; border: 1px solid rgba(255,255,255,.8); border-radius: 16px; background: rgba(255,255,255,.5); margin-bottom: 8px; font-size: 14px; font-weight: 600; }
   .who { display: flex; align-items: center; gap: 10px; min-width: 0; }
   .wname { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
@@ -439,16 +432,6 @@
       <div class="row"><button type="button" class="btn btn-ghost" id="pinCancel">Cancel</button><button type="submit" class="btn btn-primary" id="pinOk">Unlock</button></div>
     </form>
   </div>
-  <div class="pin-veil" id="pwVeil" hidden role="dialog" aria-modal="true" aria-labelledby="pwTitle">
-    <form class="pin-card" id="pwForm" autocomplete="off">
-      <h3 id="pwTitle">Backup password</h3>
-      <p id="pwText"></p>
-      <input type="password" class="pw" id="pwInput" maxlength="64" autocomplete="new-password" aria-label="Backup password" placeholder="Backup password">
-      <input type="password" class="pw" id="pwInput2" maxlength="64" autocomplete="new-password" aria-label="Repeat backup password" placeholder="Repeat password" hidden>
-      <div class="pin-msg" id="pwMsg" aria-live="polite"></div>
-      <div class="row"><button type="button" class="btn btn-ghost" id="pwCancel">Cancel</button><button type="submit" class="btn btn-primary" id="pwOk">OK</button></div>
-    </form>
-  </div>
 
   <main class="shell">
     <!-- Camera card -->
@@ -493,15 +476,6 @@
         <div class="enrolled">
           <h3>Enrolled profiles</h3>
           <div id="enrolledList"></div>
-        </div>
-        <div class="backup">
-          <h3>Backup</h3>
-          <p id="backupStatus">Checking backup…</p>
-          <div class="row">
-            <button type="button" class="btn btn-ghost btn-sm" id="btnBackupPw">Set backup password</button>
-            <button type="button" class="btn btn-ghost btn-sm" id="btnRestore">Restore backup</button>
-          </div>
-          <input type="file" id="restoreFile" accept=".json,application/json" hidden>
         </div>
         <button type="button" class="pin-change" id="btnChangePin">Change enrollment passcode</button>
       </div>
@@ -1487,7 +1461,6 @@ async function saveEnrollmentName() {
   tracks.forEach(t => { t.name = null; });
   renderEnrolledList(); renderLog(); setStatus(`${name} enrolled.`, 'ok', 1500);
   enrDirty = true; await persist();
-  scheduleBackup();
 }
 function cancelEnrollment() { capturedDescriptorForSave = null; $('nameSection').classList.add('hidden'); }
 async function deleteEnrollment(id) {
@@ -1496,7 +1469,6 @@ async function deleteEnrollment(id) {
   enrollments = enrollments.filter(x => x.id !== id);
   tracks.forEach(t => { t.name = null; });
   renderEnrolledList(); renderLog(); enrDirty = true; await persist();
-  scheduleBackup();
 }
 function renderEnrolledList() {
   const box = $('enrolledList'); box.replaceChildren();
@@ -1506,128 +1478,6 @@ function renderEnrolledList() {
     if (e.section) left.appendChild(h('span', { class: 'pill', text: e.section }));
     box.appendChild(h('div', { class: 'enrolled-item' }, left, h('button', { class: 'btn btn-danger btn-sm', text: 'Delete', onclick: () => deleteEnrollment(e.id) })));
   }
-}
-
-/* ---------- backup of enrolled faces (to a private Google Drive folder, through the Sheet script) ----------
-   The backup password is never stored: it is turned into a locked key (PBKDF2 → AES-256) that this device can use
-   but not reveal. Every enroll/delete makes a new encrypted backup, which waits on the device until the Sheet
-   script has saved it. Restoring needs the backup file (downloaded from Drive) and its password. */
-const BACKUP_KDF_ITER = 310000, BACKUP_LAST = 'caipsd_backup_last';
-let backupTimer = 0, backupSending = false, backupNextTry = 0, backupProblem = '';
-function kv(mode, fn) { return openDB().then(db => new Promise((res, rej) => { const tx = db.transaction('k', mode); const q = fn(tx.objectStore('k')); tx.oncomplete = () => res(q && q.result); tx.onerror = () => rej(tx.error); })); }
-const kvGet = (k) => kv('readonly', s => s.get(k)).catch(() => null);
-const kvPut = (k, v) => kv('readwrite', s => s.put(v, k));
-const kvDel = (k) => kv('readwrite', s => s.delete(k));
-async function deriveBackupKey(password, saltB64, iterations) {
-  const base = await crypto.subtle.importKey('raw', enc.encode(password), 'PBKDF2', false, ['deriveKey']);
-  return crypto.subtle.deriveKey({ name: 'PBKDF2', hash: 'SHA-256', salt: fromB64(saltB64), iterations }, base, { name: 'AES-GCM', length: 256 }, false, ['encrypt', 'decrypt']);
-}
-async function getBackupKey() { const v = await kvGet('backup'); return v && v.key && v.salt ? v : null; }
-function scheduleBackup() { clearTimeout(backupTimer); backupTimer = setTimeout(() => runBackup().catch(e => console.warn('Backup failed', e)), 1500); }
-async function runBackup() {
-  const bk = await getBackupKey();
-  if (!bk) { renderBackupStatus(); return; }
-  const faces = enrollments.map(e => ({ id: e.id, name: e.name, section: e.section, d: toB64(new Uint8Array(Float32Array.from(e.descriptor).buffer)) }));
-  const iv = crypto.getRandomValues(new Uint8Array(12));
-  const data = await crypto.subtle.encrypt({ name: 'AES-GCM', iv }, bk.key, enc.encode(JSON.stringify(faces)));
-  const file = { type: 'caipsd-faces-backup', v: 1, app: 'CAIPSD Attendance', created: new Date().toISOString(), count: faces.length,
-                 kdf: { name: 'PBKDF2', hash: 'SHA-256', iterations: bk.iterations, salt: bk.salt }, iv: toB64(iv), data: toB64(data) };
-  await kvPut('pendingBackup', JSON.stringify(file));   // already encrypted; waits here until the Sheet has it
-  backupNextTry = 0; backupProblem = '';
-  renderBackupStatus();
-  sendPendingBackup();
-}
-async function sendPendingBackup() {
-  if (backupSending || !syncEnabled() || !navigator.onLine || Date.now() < backupNextTry) return;
-  const pending = await kvGet('pendingBackup');
-  if (!pending) return;
-  backupSending = true;
-  try {
-    const r = await sendToSheet({ kind: 'backup', backup: pending }, replyFails >= 3);
-    if (r.result === 'saved' || r.result === 'sent') {
-      if (await kvGet('pendingBackup') === pending) await kvDel('pendingBackup');   // a newer backup made meanwhile stays queued
-      try { localStorage.setItem(BACKUP_LAST, JSON.stringify({ at: Date.now(), count: JSON.parse(pending).count })); } catch (e) {}
-      backupProblem = '';
-    } else if (r.result === 'rejected') {   // e.g. the Sheet script hasn't been updated yet: try again later
-      backupProblem = r.reason || 'refused'; backupNextTry = Date.now() + 10 * 60e3;
-    } else backupNextTry = Date.now() + 60e3;
-  } catch (e) { backupNextTry = Date.now() + 60e3; }
-  finally { backupSending = false; renderBackupStatus(); }
-}
-async function renderBackupStatus() {
-  const el = $('backupStatus'); if (!el) return;
-  const bk = await getBackupKey(), pending = await kvGet('pendingBackup');
-  let last = null; try { last = JSON.parse(localStorage.getItem(BACKUP_LAST) || 'null'); } catch (e) {}
-  const when = (t) => new Date(t).toLocaleString([], { weekday: 'short', month: 'short', day: 'numeric', hour: 'numeric', minute: '2-digit' });
-  let text, warn = false;
-  if (!bk) { text = 'Backups are off. Set a backup password and the enrolled faces will be saved to your Google Drive automatically.'; warn = true; }
-  else if (backupProblem) { text = `The Google Sheet did not accept the backup (${backupProblem}). It will try again.`; warn = true; }
-  else if (pending) text = navigator.onLine ? 'Backing up to Google Drive…' : 'Backup is waiting on this device and goes to Google Drive when the internet is back.';
-  else if (last) text = `Last backup to Google Drive: ${when(last.at)} (${last.count} face${last.count === 1 ? '' : 's'}).`;
-  else text = 'Backup password is set. The next change is backed up automatically.';
-  el.textContent = text; el.className = warn ? 'warn' : '';
-  $('btnBackupPw').textContent = bk ? 'Change backup password' : 'Set backup password';
-}
-async function setBackupPassword() {
-  const had = !!(await getBackupKey());
-  const pw = await askPassword({ title: had ? 'Change backup password' : 'Backup password', ok: 'Save', repeat: true,
-    text: 'Choose a password (at least 8 characters) to lock the backups. You will need it to restore, so keep it somewhere safe. It is not saved anywhere.' + (had ? ' Older backups keep their old password.' : '') });
-  if (!pw) return;
-  const salt = toB64(crypto.getRandomValues(new Uint8Array(16)));
-  await kvPut('backup', { key: await deriveBackupKey(pw, salt, BACKUP_KDF_ITER), salt, iterations: BACKUP_KDF_ITER });
-  setStatus('Backup password saved. Backing up the enrolled faces…', 'ok', 3000);
-  await runBackup();
-}
-async function restoreFromFile(file) {
-  let obj = null;
-  try { obj = JSON.parse(await file.text()); } catch (e) {}
-  const kdf = obj && obj.kdf;
-  if (!obj || obj.type !== 'caipsd-faces-backup' || typeof obj.iv !== 'string' || typeof obj.data !== 'string' || !kdf || typeof kdf.salt !== 'string'
-      || !(kdf.iterations >= 100000 && kdf.iterations <= 2000000)) { setStatus('That file is not a CAIPSD Attendance backup.', 'err', 6000); return; }
-  const when = obj.created ? new Date(obj.created).toLocaleString([], { month: 'short', day: 'numeric', year: 'numeric', hour: 'numeric', minute: '2-digit' }) : 'an unknown date';
-  const pw = await askPassword({ title: 'Restore backup', ok: 'Restore', text: `Backup from ${when} with ${Number(obj.count) || 0} faces. Enter the backup password it was made with.`,
-    check: async (p) => { try {
-      const key = await deriveBackupKey(p, kdf.salt, kdf.iterations);
-      return JSON.parse(dec.decode(await crypto.subtle.decrypt({ name: 'AES-GCM', iv: fromB64(obj.iv) }, key, fromB64(obj.data))));
-    } catch (e) { return null; } } });
-  if (!pw) return;
-  const list = pw.result;
-  const restored = sanitizeEnrollments((Array.isArray(list) ? list : []).map(x => {
-    let d = []; try { d = Array.from(new Float32Array(fromB64(String(x.d)).buffer)); } catch (e) {}
-    return { id: x.id, name: x.name, section: x.section, descriptor: d };
-  }));
-  if (!restored.length) { setStatus('The backup has no usable faces.', 'err', 6000); return; }
-  if (!confirm(`Replace the ${enrollments.length} enrolled face${enrollments.length === 1 ? '' : 's'} on this device with the ${restored.length} from the backup?`)) return;
-  enrollments = restored; tracks.forEach(t => { t.name = null; });
-  enrDirty = true; await persist();
-  renderEnrolledList(); renderLog();
-  setStatus(`✓ Restored ${restored.length} enrolled face${restored.length === 1 ? '' : 's'} from the backup.`, 'ok', 5000);
-}
-// Password box. repeat: ask twice (new password). check(p): async test; resolves {password, result} only if it passes.
-function askPassword({ title, text, ok, repeat, check }) {
-  return new Promise(resolve => {
-    const veil = $('pwVeil'), inp = $('pwInput'), inp2 = $('pwInput2'), msg = $('pwMsg'), form = $('pwForm');
-    $('pwTitle').textContent = title; $('pwText').textContent = text; $('pwOk').textContent = ok || 'OK';
-    inp.value = ''; inp2.value = ''; inp2.hidden = !repeat; msg.textContent = '';
-    veil.hidden = false; setTimeout(() => inp.focus(), 30);
-    const finish = (v) => { veil.hidden = true; inp.value = ''; inp2.value = ''; msg.textContent = ''; form.onsubmit = null; $('pwCancel').onclick = null; resolve(v); };
-    $('pwCancel').onclick = () => finish(null);
-    form.onsubmit = async (e) => {
-      e.preventDefault();
-      const p = inp.value;
-      if (repeat) {
-        if (p.length < 8) { msg.textContent = 'Use at least 8 characters.'; return; }
-        if (inp2.value !== p) { msg.textContent = "The two passwords don't match."; inp2.value = ''; inp2.focus(); return; }
-        return finish(p);
-      }
-      if (!p) return;
-      msg.textContent = 'Checking…'; $('pwOk').disabled = true;
-      const result = check ? await check(p) : true;
-      $('pwOk').disabled = false;
-      if (!result) { msg.textContent = 'Wrong password, or the file is damaged.'; inp.value = ''; inp.focus(); return; }
-      finish({ password: p, result });
-    };
-  });
 }
 
 /* ---------- records ---------- */
@@ -1719,7 +1569,6 @@ async function flushOutbox() {
   } catch (e) { console.error('Outbox flush failed', e); }
   flushing = false; refreshSyncPill();
   if (flushAgain) { flushAgain = false; flushOutbox(); }
-  sendPendingBackup();   // a backup of enrolled faces waiting to reach Google Drive
 }
 // The Sheet refused a check-in: say so on screen and mark it in the log, so the screen matches the Sheet.
 function onSheetRejected(p, reason) {
@@ -1794,7 +1643,7 @@ function setMode(m) {
   $('tabRecognize').classList.toggle('active', m !== 'enroll');
   $('tabEnroll').classList.toggle('active', m === 'enroll');
   $('enrollControls').classList.toggle('hidden', m !== 'enroll');
-  if (m !== 'enroll') { cancelEnrollment(); clearTimeout(enrollIdleTimer); } else renderBackupStatus();
+  if (m !== 'enroll') { cancelEnrollment(); clearTimeout(enrollIdleTimer); }
   tracks = []; stepsKey = ''; statusHoldUntil = 0; frameState = ''; frameFace = null;
 }
 
@@ -1952,9 +1801,6 @@ function askPin(kind) {
 $('tabRecognize').addEventListener('click', () => setMode('recognize'));
 $('tabEnroll').addEventListener('click', () => { if (mode !== 'enroll') askPin('unlock').then(ok => { if (ok) { setMode('enroll'); touchEnroll(); } }); });
 $('btnChangePin').addEventListener('click', () => askPin('change'));
-$('btnBackupPw').addEventListener('click', () => setBackupPassword().catch(e => { console.error(e); setStatus('Could not save the backup password.', 'err', 5000); }));
-$('btnRestore').addEventListener('click', () => $('restoreFile').click());
-$('restoreFile').addEventListener('change', (e) => { const f = e.target.files && e.target.files[0]; e.target.value = ''; if (f) restoreFromFile(f).catch(err => { console.error(err); setStatus('Restore failed.', 'err', 5000); }); });
 $('btnFlip').addEventListener('click', flipCamera);
 $('btnCapture').addEventListener('click', captureEnrollment);
 $('btnSaveEnroll').addEventListener('click', saveEnrollmentName);
