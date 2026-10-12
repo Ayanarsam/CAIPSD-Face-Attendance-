@@ -10,7 +10,7 @@
 <meta name="apple-mobile-web-app-capable" content="yes">
 <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
 <meta name="apple-mobile-web-app-title" content="CAIPSD Attendance">
-<meta http-equiv="Content-Security-Policy" content="default-src 'none'; manifest-src 'self'; script-src 'sha256-foxyoF8pY08Ms0ubo2SlCW5P7145XXCOiLABllp5rqA=' https://cdn.jsdelivr.net/npm/face-api.js@0.22.2/ https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@0.10.14/ 'wasm-unsafe-eval'; style-src 'unsafe-inline' https://fonts.googleapis.com; font-src https://fonts.gstatic.com; img-src 'self' data: blob:; media-src 'self' blob:; connect-src https://cdn.jsdelivr.net/npm/@vladmandic/face-api@1.7.13/model/ https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@0.10.14/ https://storage.googleapis.com/mediapipe-models/face_landmarker/ https://script.google.com/macros/s/ https://script.googleusercontent.com data: blob:; worker-src 'self' blob: https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@0.10.14/; base-uri 'none'; form-action 'none'; object-src 'none'">
+<meta http-equiv="Content-Security-Policy" content="default-src 'none'; manifest-src 'self'; script-src 'sha256-/n4cMUvayX87+oUInWPssyIepPWETC/LWGfa5BEwx9c=' https://cdn.jsdelivr.net/npm/face-api.js@0.22.2/ https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@0.10.14/ 'wasm-unsafe-eval'; style-src 'unsafe-inline' https://fonts.googleapis.com; font-src https://fonts.gstatic.com; img-src 'self' data: blob:; media-src 'self' blob:; connect-src https://cdn.jsdelivr.net/npm/@vladmandic/face-api@1.7.13/model/ https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@0.10.14/ https://storage.googleapis.com/mediapipe-models/face_landmarker/ https://script.google.com/macros/s/ https://script.googleusercontent.com data: blob:; worker-src 'self' blob: https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@0.10.14/; base-uri 'none'; form-action 'none'; object-src 'none'">
 <meta name="referrer" content="no-referrer">
 <meta name="robots" content="noindex, nofollow">
 <title>CAIPSD Attendance</title>
@@ -596,7 +596,8 @@ function sanitizeEnrollments(list) {
 function sanitizeRecords(list) {
   if (!Array.isArray(list)) return [];
   return list.filter(r => r && typeof r.name === 'string' && Number.isFinite(r.ts))
-    .map(r => ({ name: clean(r.name, 60), section: clean(r.section, 20), date: clean(r.date, 40), time: clean(r.time, 40), ts: r.ts, late: r.late === true }))
+    .map(r => Object.assign({ name: clean(r.name, 60), section: clean(r.section, 20), date: clean(r.date, 40), time: clean(r.time, 40), ts: r.ts, late: r.late === true },
+      r.sync === 'rejected' ? { sync: 'rejected', reason: clean(r.reason, 60) } : {}))
     .filter(r => r.name);
 }
 function localDate(d) { return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`; }
@@ -703,27 +704,70 @@ async function loadData() {
   enrollments = sanitizeEnrollments(e); records = sanitizeRecords(r);
 }
 
-/* ---------- camera ---------- */
-async function startCamera() {
+/* ---------- camera (restarts itself if it disconnects, freezes or is busy) ---------- */
+let camError = '', camStarting = null, camRetryTimer = 0, camRetryDelay = 3000, lastFrameTime = -1, lastFrameAt = 0;
+function startCamera() {
+  if (!camStarting) camStarting = openCamera().finally(() => { camStarting = null; });
+  return camStarting;
+}
+async function openCamera() {
   stopCamera();
+  clearTimeout(camRetryTimer);
   try {
-    mediaStream = await navigator.mediaDevices.getUserMedia({ video: { facingMode: facing, width: { ideal: 640 }, height: { ideal: 480 }, frameRate: { ideal: 30, max: 30 } }, audio: false });
-    video.srcObject = mediaStream;
+    const stream = await navigator.mediaDevices.getUserMedia({ video: { facingMode: facing, width: { ideal: 640 }, height: { ideal: 480 }, frameRate: { ideal: 30, max: 30 } }, audio: false });
+    mediaStream = stream;
+    stream.getVideoTracks().forEach(t => t.addEventListener('ended', () => { if (mediaStream === stream) cameraLost('Camera disconnected.'); }));
+    video.srcObject = stream;
     video.classList.toggle('mirror', facing === 'user');
-    await new Promise(res => { if (video.readyState >= 1) res(); else video.onloadedmetadata = res; });
+    await new Promise((res, rej) => {
+      if (video.readyState >= 1) return res();
+      const t = setTimeout(() => rej(new Error('the camera sent no picture')), 8000);
+      video.onloadedmetadata = () => { clearTimeout(t); res(); };
+    });
     video.play().catch(() => {});
-    camError = '';
+    camError = ''; camRetryDelay = 3000; tracks = [];
+    lastFrameTime = -1; lastFrameAt = performance.now();
+    statusHoldUntil = 0;   // clear a "camera error" message that was holding the status bar
     setStatus(engineReady ? 'Camera ready. Look at the camera.' : 'Starting face engine…', 'wait');
+    loadMediapipe();       // fast blink engine (loads once; also covers a camera that was unavailable at start)
     return true;
   } catch (err) {
-    camError = err.name === 'NotAllowedError' ? 'Camera blocked. Allow camera access in the browser settings, then reload.' : 'Camera error: ' + err.message;
-    setStatus(camError, 'err', 600000);   // stays on screen until fixed
+    stopCamera();
+    camError = err.name === 'NotAllowedError' ? 'Camera blocked. Allow camera access in the browser settings.'
+             : err.name === 'NotReadableError' ? 'The camera is busy (another app may be using it).'
+             : err.name === 'NotFoundError' ? 'No camera found. Check the camera cable.'
+             : 'Camera problem: ' + err.message + '.';
+    statusHoldUntil = 0;
+    setStatus(camError + ' Retrying…', 'err', 600000);   // stays on screen until the camera is back
+    scheduleCameraRetry();
     return false;
   }
 }
-let camError = '';
+function scheduleCameraRetry() {
+  clearTimeout(camRetryTimer);
+  camRetryTimer = setTimeout(() => { if (document.hidden) scheduleCameraRetry(); else startCamera(); }, camRetryDelay);
+  camRetryDelay = Math.min(15000, Math.round(camRetryDelay * 1.6));   // 3 s, 5 s, 8 s … then every 15 s
+}
+function cameraLost(why) {
+  if (camStarting) return;
+  console.warn('Camera lost:', why);
+  stopCamera(); tracks = [];
+  camError = why;
+  statusHoldUntil = 0;
+  setStatus(why + ' Reconnecting…', 'err', 600000);
+  camRetryDelay = 1500;
+  scheduleCameraRetry();
+}
+// every 3 s: is the camera still connected and still sending new pictures?
+setInterval(() => {
+  if (document.hidden || camStarting || !mediaStream || !video) return;
+  if (!mediaStream.active || !mediaStream.getVideoTracks().some(t => t.readyState === 'live')) return cameraLost('Camera disconnected.');
+  if (video.paused) video.play().catch(() => {});
+  if (video.currentTime !== lastFrameTime) { lastFrameTime = video.currentTime; lastFrameAt = performance.now(); }
+  else if (performance.now() - lastFrameAt > 8000) cameraLost('The camera stopped sending pictures.');
+}, 3000);
 function stopCamera() { if (mediaStream) mediaStream.getTracks().forEach(t => t.stop()); mediaStream = null; }
-async function flipCamera() { facing = facing === 'user' ? 'environment' : 'user'; tracks = []; if (await startCamera() && !faceLandmarker) loadMediapipe(); }
+async function flipCamera() { facing = facing === 'user' ? 'environment' : 'user'; tracks = []; await startCamera(); }
 
 /* ---------- detection: a fast eye/blink loop that never waits for face recognition ---------- */
 // MediaPipe eye contours (person's right eye = left side of the raw image)
@@ -754,7 +798,10 @@ function faceBox(pts, lp, rp, padTop, pad) {
 }
 
 // MediaPipe loads in the background; until then the face-api engine handles blinks.
+let mpLoading = false;
 async function loadMediapipe() {
+  if (faceLandmarker || mpLoading) return;   // load once (switching camera early used to start a second copy)
+  mpLoading = true;
   try {
     const { FaceLandmarker, FilesetResolver } = await import("https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@0.10.14/vision_bundle.mjs");
     const fs = await FilesetResolver.forVisionTasks("https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@0.10.14/wasm");
@@ -766,6 +813,7 @@ async function loadMediapipe() {
     engine = 'mp'; tracks = [];
     mpLoop();
   } catch (e) { console.warn('MediaPipe unavailable, using face-api blink detection', e); faceLandmarker = null; engine = 'faceapi'; }
+  finally { mpLoading = false; }
 }
 
 /* Engine A (until MediaPipe is ready): face-api box + 68 landmarks every frame.
@@ -1218,7 +1266,7 @@ function streaks() {
   const now = new Date(), key = now.toDateString() + '|' + records.length;
   if (streakCache.key === key) return streakCache.map;
   const days = new Map();
-  for (const r of records) { if (!days.has(r.name)) days.set(r.name, new Set()); days.get(r.name).add(new Date(r.ts).toDateString()); }
+  for (const r of records) { if (r.sync === 'rejected') continue; if (!days.has(r.name)) days.set(r.name, new Set()); days.get(r.name).add(new Date(r.ts).toDateString()); }
   const today = new Date(now.getFullYear(), now.getMonth(), now.getDate()), weekend = today.getDay() === 0 || today.getDay() === 6;
   const map = new Map();
   for (const [name, set] of days) {
@@ -1244,7 +1292,7 @@ function weekInfo(now = new Date()) {
 function weekStats() {
   const w = weekInfo(), seen = new Map(), daily = [0, 0, 0, 0, 0];
   for (const r of records) {
-    if (r.ts < w.start || r.ts >= w.end) continue;
+    if (r.ts < w.start || r.ts >= w.end || r.sync === 'rejected') continue;   // refused by the Sheet: not counted
     const d = new Date(r.ts), idx = (d.getDay() + 6) % 7;
     if (idx > 4) continue;
     if (!seen.has(r.name)) seen.set(r.name, new Set());
@@ -1404,11 +1452,19 @@ async function queueSync(payload) {
   catch (e) { console.warn('Outbox save failed, sending directly', e); sendToSheet(payload).catch(() => {}); return; }
   refreshSyncPill(); flushOutbox();
 }
-function sendToSheet(payload) {
+// Sends one check-in and reads the Sheet's reply: {result: 'saved' | 'duplicate' | 'rejected' | 'busy' | 'error', reason}.
+// blind = true sends without reading the reply (only used if replies can't be read on this device).
+async function sendToSheet(payload, blind) {
   const ac = new AbortController(), t = setTimeout(() => ac.abort(), 20000);
-  return fetch(GOOGLE_SHEET_WEB_APP_URL, { method: 'POST', mode: 'no-cors', headers: { 'Content-Type': 'text/plain' }, body: JSON.stringify({ ...payload, token: SYNC_TOKEN }), referrerPolicy: 'no-referrer', credentials: 'omit', signal: ac.signal })
-    .finally(() => clearTimeout(t));
+  try {
+    const res = await fetch(GOOGLE_SHEET_WEB_APP_URL, { method: 'POST', mode: blind ? 'no-cors' : 'cors', headers: { 'Content-Type': 'text/plain' }, body: JSON.stringify({ ...payload, token: SYNC_TOKEN }), referrerPolicy: 'no-referrer', credentials: 'omit', signal: ac.signal });
+    if (blind) return { result: 'sent' };
+    const text = await res.text();
+    try { const j = JSON.parse(text); if (j && typeof j.result === 'string') return { result: j.result, reason: typeof j.reason === 'string' ? j.reason : '' }; } catch (e) {}
+    return { result: 'error' };   // not a reply from our script (e.g. a Google error page): try again later
+  } finally { clearTimeout(t); }
 }
+let replyFails = 0;   // requests that failed while online; if replies keep failing, fall back to sending without a reply
 async function flushOutbox() {
   if (!outboxReady) return;
   if (flushing) { flushAgain = true; return; }
@@ -1420,14 +1476,41 @@ async function flushOutbox() {
       let payload = null;
       try { payload = await unseal(await outboxTx('readonly', s => s.get(k))); } catch (e) {}
       if (!payload) { await outboxTx('readwrite', s => s.delete(k)); continue; }   // unreadable entry, drop it
-      try { await sendToSheet(payload); }          // resolves once the request reaches Google
-      catch (e) { console.warn('Still offline, will retry', e); break; }
-      await outboxTx('readwrite', s => s.delete(k));
+      const blind = replyFails >= 3;
+      let r;
+      try { r = await sendToSheet(payload, blind); }
+      catch (e) { if (navigator.onLine && e.name !== 'AbortError') replyFails++; console.warn('No reply from the Sheet, will retry', e); break; }
+      if (r.result === 'busy' || r.result === 'error') { console.warn('Sheet could not save it yet, will retry', r); break; }   // stays on the device
+      replyFails = 0;
+      await outboxTx('readwrite', s => s.delete(k));   // saved, already there, refused, or sent blind
+      if (r.result === 'rejected') onSheetRejected(payload, r.reason);
       refreshSyncPill();
     }
   } catch (e) { console.error('Outbox flush failed', e); }
   flushing = false; refreshSyncPill();
   if (flushAgain) { flushAgain = false; flushOutbox(); }
+}
+// The Sheet refused a check-in: say so on screen and mark it in the log, so the screen matches the Sheet.
+function onSheetRejected(p, reason) {
+  reason = clean(reason, 60) || 'Refused';
+  console.warn('Sheet refused the check-in of', p.name, '-', reason);
+  if (/^already checked in/i.test(reason)) return;   // they are present already (e.g. checked in on another device)
+  const rec = records.find(r => r.ts === p.ts && r.name === p.name);
+  const first = String(p.name || '').split(' ')[0];
+  let msg;
+  if (/photo/i.test(reason)) {
+    if (rec) records = records.filter(r => r !== rec);   // no photo: let them check in again
+    msg = `${first}, no photo was taken. Please check in again.`;
+  } else {
+    if (rec) { rec.sync = 'rejected'; rec.reason = reason; }
+    msg = /roster/i.test(reason) ? `${first} is not on the roster, so attendance was not saved. Ask an admin to add you.`
+        : /office hours/i.test(reason) ? `${first}'s check-in was outside office hours, so it was not saved.`
+        : `${first}'s check-in was not saved (${reason}). Ask an admin.`;
+  }
+  presentCache.key = ''; streakCache.key = '';
+  persist(); renderLog();
+  statusHoldUntil = 0;
+  setStatus('⚠ ' + msg, 'err', 9000);
 }
 let lastCounts = '';
 function renderLog() {
@@ -1443,7 +1526,7 @@ function renderLog() {
   if (!records.length) { body.appendChild(h('tr', null, h('td', { colSpan: 5, class: 'empty-state' }, h('div', { class: 'empty-ico', text: '📋' }), h('div', { text: 'No attendance yet. Students appear here as soon as they blink to check in.' })))); return; }
   for (const r of records.slice().reverse().slice(0, 150)) {   // newest 150 rows on screen; CSV export has everything
     const av = h('div', { class: 'avatar', text: (r.name || '?').charAt(0).toUpperCase() });
-    const row = h('tr', null, h('td', null, h('div', { class: 'namecell' }, av, h('span', { text: r.name }))), h('td', { text: r.section || '' }), h('td', { text: r.date }), h('td', { text: r.time }), h('td', null, (LATE_AFTER && r.late) ? h('span', { class: 'chip-late', text: 'Late' }) : h('span', { class: 'chip-ok', text: 'Present' })));
+    const row = h('tr', null, h('td', null, h('div', { class: 'namecell' }, av, h('span', { text: r.name }))), h('td', { text: r.section || '' }), h('td', { text: r.date }), h('td', { text: r.time }), h('td', null, r.sync === 'rejected' ? h('span', { class: 'chip-late', text: 'Not saved', title: r.reason || 'Refused by the Sheet' }) : (LATE_AFTER && r.late) ? h('span', { class: 'chip-late', text: 'Late' }) : h('span', { class: 'chip-ok', text: 'Present' })));
     if (r.ts === highlightTs) row.className = 'new';
     body.appendChild(row);
   }
@@ -1456,7 +1539,7 @@ async function clearRecords() {
 }
 function exportCSV() {
   let csv = 'Name,Section,Date,Time,Status\n';
-  records.forEach(r => { csv += [r.name, r.section, r.date, r.time, (LATE_AFTER && r.late) ? 'Late' : 'Present'].map(csvCell).join(',') + '\n'; });
+  records.forEach(r => { csv += [r.name, r.section, r.date, r.time, r.sync === 'rejected' ? 'Not saved (' + (r.reason || 'refused') + ')' : (LATE_AFTER && r.late) ? 'Late' : 'Present'].map(csvCell).join(',') + '\n'; });
   downloadText(csv, 'attendance_' + localDate(new Date()) + '.csv', 'text/csv');
 }
 
@@ -1508,9 +1591,8 @@ async function init() {
   libP.catch(() => {});   // handled below, once the app is on screen
 
   setProgress(30, 'Starting camera…');
-  const camP = startCamera();                 // camera and stored data start together
+  startCamera();                              // camera and stored data start together (the camera also starts the blink engine)
   const dataP = loadData();
-  camP.then(ok => { if (ok) loadMediapipe(); });   // fast blink engine (skipped if the camera is blocked)
 
   // Open the app as soon as the stored data is ready; the face engine finishes loading behind it.
   await dataP;
@@ -1638,7 +1720,11 @@ document.addEventListener('pointerdown', unlockAudio, { passive: true });
 window.addEventListener('online', flushOutbox);
 window.addEventListener('offline', refreshSyncPill);
 setInterval(flushOutbox, 60000);   // retry every minute in case the 'online' event is missed
-document.addEventListener('visibilitychange', () => { if (!document.hidden && mediaStream && !mediaStream.active) startCamera(); });
+document.addEventListener('visibilitychange', () => {
+  if (document.hidden) return;
+  lastFrameAt = performance.now();   // the video pauses while hidden; that is not a frozen camera
+  if (!mediaStream || !mediaStream.active) startCamera();
+});
 
 // Extra deterrent on computers without the kiosk policy (the browser policy is the real lock).
 document.addEventListener('contextmenu', e => { if (!e.target.closest('input')) e.preventDefault(); });
