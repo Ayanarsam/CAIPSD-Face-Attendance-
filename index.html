@@ -10,7 +10,7 @@
 <meta name="apple-mobile-web-app-capable" content="yes">
 <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
 <meta name="apple-mobile-web-app-title" content="CAIPSD Attendance">
-<meta http-equiv="Content-Security-Policy" content="default-src 'none'; manifest-src 'self'; script-src 'sha256-/n4cMUvayX87+oUInWPssyIepPWETC/LWGfa5BEwx9c=' https://cdn.jsdelivr.net/npm/face-api.js@0.22.2/ https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@0.10.14/ 'wasm-unsafe-eval'; style-src 'unsafe-inline' https://fonts.googleapis.com; font-src https://fonts.gstatic.com; img-src 'self' data: blob:; media-src 'self' blob:; connect-src https://cdn.jsdelivr.net/npm/@vladmandic/face-api@1.7.13/model/ https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@0.10.14/ https://storage.googleapis.com/mediapipe-models/face_landmarker/ https://script.google.com/macros/s/ https://script.googleusercontent.com data: blob:; worker-src 'self' blob: https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@0.10.14/; base-uri 'none'; form-action 'none'; object-src 'none'">
+<meta http-equiv="Content-Security-Policy" content="default-src 'none'; manifest-src 'self'; script-src 'sha256-wGGuoHRwtGZNR7ptokCPEZ589MHdLXks5jeT/EzrQlk=' https://cdn.jsdelivr.net/npm/face-api.js@0.22.2/ https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@0.10.14/ 'wasm-unsafe-eval'; style-src 'unsafe-inline' https://fonts.googleapis.com; font-src https://fonts.gstatic.com; img-src 'self' data: blob:; media-src 'self' blob:; connect-src https://cdn.jsdelivr.net/npm/@vladmandic/face-api@1.7.13/model/ https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@0.10.14/ https://storage.googleapis.com/mediapipe-models/face_landmarker/ https://script.google.com/macros/s/ https://script.googleusercontent.com data: blob:; worker-src 'self' blob: https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@0.10.14/; base-uri 'none'; form-action 'none'; object-src 'none'">
 <meta name="referrer" content="no-referrer">
 <meta name="robots" content="noindex, nofollow">
 <title>CAIPSD Attendance</title>
@@ -18,7 +18,7 @@
 <link rel="preconnect" href="https://cdn.jsdelivr.net" crossorigin>
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
-<link id="fontCss" href="https://fonts.googleapis.com/css2?family=Plus+Jakarta+Sans:wght@400;500;600;700;800&display=swap" rel="stylesheet" media="print">
+<link id="fontCss" href="https://fonts.googleapis.com/css2?family=Plus+Jakarta+Sans:wght@400;500;600;700;800&display=swap" rel="stylesheet" media="print" crossorigin="anonymous">
 <link rel="preload" as="fetch" crossorigin href="https://cdn.jsdelivr.net/npm/@vladmandic/face-api@1.7.13/model/tiny_face_detector_model-weights_manifest.json">
 <link rel="preload" as="fetch" crossorigin href="https://cdn.jsdelivr.net/npm/@vladmandic/face-api@1.7.13/model/tiny_face_detector_model.bin">
 <link rel="preload" as="fetch" crossorigin href="https://cdn.jsdelivr.net/npm/@vladmandic/face-api@1.7.13/model/face_landmark_68_model-weights_manifest.json">
@@ -631,23 +631,28 @@ function fromB64(s) { const bin = atob(s), out = new Uint8Array(bin.length); for
 let dbP = null;
 function openDB() {
   return dbP || (dbP = new Promise((res, rej) => {
-    const r = indexedDB.open('caipsd', 3);
-    r.onupgradeneeded = () => { const d = r.result; if (!d.objectStoreNames.contains('k')) d.createObjectStore('k'); if (!d.objectStoreNames.contains('photos')) d.createObjectStore('photos'); if (!d.objectStoreNames.contains('outbox')) d.createObjectStore('outbox'); };
+    const r = indexedDB.open('caipsd', 4);
+    r.onupgradeneeded = () => { const d = r.result; for (const s of ['k', 'photos', 'outbox', 'rec']) if (!d.objectStoreNames.contains(s)) d.createObjectStore(s); };
     r.onsuccess = () => res(r.result); r.onerror = () => rej(r.error);
   }));
 }
 // Check-in photos live in IndexedDB (big quota), each one encrypted with the device key.
-const photoCache = new Map();
+// The Google Sheet / Drive keep the real copies, so the device keeps only the last PHOTO_KEEP_DAYS days.
+const PHOTO_KEEP_DAYS = 60;
 async function putPhoto(ts, dataUrl) {
   try {
     const db = await openDB(), val = await seal({ img: dataUrl });
     await new Promise((res, rej) => { const tx = db.transaction('photos', 'readwrite'); tx.objectStore('photos').put(val, ts); tx.oncomplete = res; tx.onerror = () => rej(tx.error); });
-    photoCache.set(ts, dataUrl);
   } catch (e) { console.warn('Photo save failed', e); }
 }
 async function clearPhotos() {
-  photoCache.clear();
   try { const db = await openDB(); await new Promise((res, rej) => { const tx = db.transaction('photos', 'readwrite'); tx.objectStore('photos').clear(); tx.oncomplete = res; tx.onerror = () => rej(tx.error); }); } catch (e) {}
+}
+async function pruneOldPhotos() {
+  try {
+    const db = await openDB(), cutoff = Date.now() - PHOTO_KEEP_DAYS * 864e5;
+    await new Promise((res, rej) => { const tx = db.transaction('photos', 'readwrite'); tx.objectStore('photos').delete(IDBKeyRange.upperBound(cutoff)); tx.oncomplete = res; tx.onerror = () => rej(tx.error); });
+  } catch (e) {}
 }
 async function getDeviceKey() {
   try {
@@ -674,34 +679,86 @@ async function unseal(str) {
   return JSON.parse(dec.decode(await crypto.subtle.decrypt({ name: 'AES-GCM', iv: fromB64(i) }, deviceKey, fromB64(c))));
 }
 
-function persist() {
-  saveQueue = saveQueue.then(async () => {
-    localStorage.setItem(KEY.enr, await seal(enrollments.map(x => ({ id: x.id, name: x.name, section: x.section, descriptor: Array.from(x.descriptor) }))));
+/* Saving: enrolled faces stay in localStorage (small). Attendance records are saved one month per entry in
+   IndexedDB, so a check-in re-saves only the current month instead of every record ever (no screen freeze).
+   Changes are flagged where they happen; persist() saves only what was flagged (or everything if nothing was). */
+let enrDirty = false, recAll = false;
+const recDirty = new Set();
+const monthKey = (ts) => { const d = new Date(ts); return d.getFullYear() + '-' + String(d.getMonth() + 1).padStart(2, '0'); };
+const markRecord = (ts) => recDirty.add(monthKey(ts));
+async function saveNow() {
+  if (!enrDirty && !recAll && !recDirty.size) { enrDirty = true; recAll = true; }   // nothing flagged: save everything
+  const enr = enrDirty, all = recAll, months = new Set(recDirty);
+  enrDirty = false; recAll = false; recDirty.clear();
+  if (enr) localStorage.setItem(KEY.enr, await seal(enrollments.map(x => ({ id: x.id, name: x.name, section: x.section, descriptor: Array.from(x.descriptor) }))));
+  if (!all && !months.size) return 'none';
+  const byMonth = new Map();
+  for (const r of records) { const k = monthKey(r.ts); if (all || months.has(k)) { let l = byMonth.get(k); if (!l) byMonth.set(k, l = []); l.push(r); } }
+  const keys = all ? [...byMonth.keys()] : [...months];
+  const sealed = [];
+  for (const k of keys) { const l = byMonth.get(k); sealed.push([k, l && l.length ? await seal(l) : null]); }
+  try {
+    const db = await openDB();
+    await new Promise((res, rej) => {
+      const tx = db.transaction('rec', 'readwrite'), st = tx.objectStore('rec');
+      if (all) st.clear();
+      for (const [k, v] of sealed) { if (v === null) st.delete(k); else st.put(v, k); }
+      tx.oncomplete = res; tx.onerror = () => rej(tx.error); tx.onabort = () => rej(tx.error);
+    });
+    return 'monthly';
+  } catch (err) {   // no IndexedDB on this device (e.g. private window): keep everything in localStorage as before
+    console.warn('Monthly save unavailable, saving all records in one piece', err);
     localStorage.setItem(KEY.rec, await seal(records));
-  }).catch(err => {
+    return 'single';
+  }
+}
+function persist() {
+  saveQueue = saveQueue.then(saveNow).catch(err => {
     console.error('Save failed', err);
     if (err && (err.name === 'QuotaExceededError' || /quota/i.test(err.message || ''))) setStatus('This device’s storage is full. Export the CSV, then use Clear all to free space (the Google Sheet keeps everything).', 'err', 30000);
   });
   return saveQueue;
 }
+async function loadRecordMonths() {
+  try {
+    const db = await openDB();
+    const vals = await new Promise((res, rej) => { const q = db.transaction('rec').objectStore('rec').getAll(); q.onsuccess = () => res(q.result || []); q.onerror = () => rej(q.error); });
+    const out = [];
+    for (const v of vals) { try { const l = await unseal(v); if (Array.isArray(l)) out.push(...l); } catch (e) { console.warn('A saved month is unreadable', e); } }
+    return out;
+  } catch (e) { return null; }
+}
 async function loadData() {
   deviceKey = await getDeviceKey();
-  let e = null, r = null;
-  try { e = await unseal(localStorage.getItem(KEY.enr)); r = await unseal(localStorage.getItem(KEY.rec)); } catch (err) { console.warn('Stored data unreadable', err); }
-  if (!e && !r && (localStorage.getItem(KEY.oldEnr) || localStorage.getItem(KEY.oldRec))) {
+  let e = null, r = null, legacy = null;
+  try { e = await unseal(localStorage.getItem(KEY.enr)); } catch (err) { console.warn('Stored faces unreadable', err); }
+  const monthsLoaded = await loadRecordMonths();
+  r = monthsLoaded || [];
+  try { legacy = await unseal(localStorage.getItem(KEY.rec)); } catch (err) { console.warn('Stored records unreadable', err); }
+  if (Array.isArray(legacy) && legacy.length) {   // records saved by the previous version (all in one piece)
+    const seen = new Set(r.map(x => x.ts + '|' + x.name));
+    for (const x of legacy) if (x && !seen.has(x.ts + '|' + x.name)) r.push(x);
+  }
+  if (!e && !r.length && (localStorage.getItem(KEY.oldEnr) || localStorage.getItem(KEY.oldRec))) {
     // migrate data from the original version (drop stored photos), then delete the plaintext copy
     try {
       e = JSON.parse(localStorage.getItem(KEY.oldEnr) || '[]');
       const oldRecs = JSON.parse(localStorage.getItem(KEY.oldRec) || '[]');
       for (const x of oldRecs) if (safeImg(x.image) && Number.isFinite(x.ts)) await putPhoto(x.ts, x.image);
       r = oldRecs.map(x => ({ name: x.name, section: x.section, date: x.date, time: x.time, ts: x.ts }));
-      enrollments = sanitizeEnrollments(e); records = sanitizeRecords(r);
-      await persist();
+      enrollments = sanitizeEnrollments(e); records = sanitizeRecords(r).sort((a, b) => a.ts - b.ts);
+      enrDirty = true; recAll = true;
+      await saveNow();
       localStorage.removeItem(KEY.oldEnr); localStorage.removeItem(KEY.oldRec);
       return;
     } catch (err) { console.warn('Migration failed', err); }
   }
-  enrollments = sanitizeEnrollments(e); records = sanitizeRecords(r);
+  enrollments = sanitizeEnrollments(e); records = sanitizeRecords(r).sort((a, b) => a.ts - b.ts);
+  if (Array.isArray(legacy) && legacy.length && monthsLoaded !== null) {
+    // move the previous version's single copy into monthly saves; remove it only once that worked
+    try { recAll = true; if (await saveNow() === 'monthly') localStorage.removeItem(KEY.rec); }
+    catch (err) { console.warn('Could not move records to monthly saves yet', err); }
+  }
 }
 
 /* ---------- camera (restarts itself if it disconnects, freezes or is busy) ---------- */
@@ -1257,22 +1314,26 @@ function showSuccess(rec, photo) {
 
 /* ---------- attendance streaks (consecutive weekdays present; weekends are skipped) ---------- */
 let streakCache = { key: '', map: new Map() };
-function prevWeekday(d) {
-  const x = new Date(d.getFullYear(), d.getMonth(), d.getDate() - 1);
-  while (x.getDay() === 0 || x.getDay() === 6) x.setDate(x.getDate() - 1);
-  return x;
+// local calendar day as a whole number (days since 1 Jan 1970); worked out once per record and remembered
+const dayCache = new Map();
+function dayNum(ts) {
+  let v = dayCache.get(ts);
+  if (v === undefined) { const d = new Date(ts); v = Date.UTC(d.getFullYear(), d.getMonth(), d.getDate()) / 864e5; dayCache.set(ts, v); }
+  return v;
 }
+const isWeekendDay = (n) => { const wd = (n + 4) % 7; return wd === 0 || wd === 6; };   // day 0 was a Thursday
+const prevWeekdayNum = (n) => { n--; while (isWeekendDay(n)) n--; return n; };
 function streaks() {
   const now = new Date(), key = now.toDateString() + '|' + records.length;
   if (streakCache.key === key) return streakCache.map;
   const days = new Map();
-  for (const r of records) { if (r.sync === 'rejected') continue; if (!days.has(r.name)) days.set(r.name, new Set()); days.get(r.name).add(new Date(r.ts).toDateString()); }
-  const today = new Date(now.getFullYear(), now.getMonth(), now.getDate()), weekend = today.getDay() === 0 || today.getDay() === 6;
+  for (const r of records) { if (r.sync === 'rejected') continue; let s = days.get(r.name); if (!s) days.set(r.name, s = new Set()); s.add(dayNum(r.ts)); }
+  const today = Date.UTC(now.getFullYear(), now.getMonth(), now.getDate()) / 864e5, weekend = isWeekendDay(today);
   const map = new Map();
   for (const [name, set] of days) {
     // today only extends the streak once they check in; not checking in yet doesn't break it
-    let d = (!weekend && set.has(today.toDateString())) ? today : prevWeekday(today), n = 0;
-    while (set.has(d.toDateString())) { n++; d = prevWeekday(d); }
+    let d = (!weekend && set.has(today)) ? today : prevWeekdayNum(today), n = 0;
+    while (set.has(d)) { n++; d = prevWeekdayNum(d); }
     map.set(name, n);
   }
   streakCache = { key, map };
@@ -1338,23 +1399,41 @@ function renderWeek(pulseName) {
     bar.children[1].firstChild.style.height = (st.daily[i] / max * 100) + '%';
   });
 
-  // per-student rows
-  const list = $('weekList'); list.replaceChildren();
+  // per-student rows: each row is built once and then only its text/colours are updated (no full rebuild per check-in)
+  const list = $('weekList');
   const runs = streaks();
-  if (!st.rows.length) { list.appendChild(h('div', { class: 'empty', text: 'Enroll students to see their weekly attendance here.' })); return; }
+  if (!st.rows.length) { weekRows.clear(); list.replaceChildren(h('div', { class: 'empty', text: 'Enroll students to see their weekly attendance here.' })); return; }
+  const wanted = [];
   for (const r of st.rows) {
-    const dots = h('div', { class: 'dots' });
-    r.days.forEach((v, i) => dots.appendChild(h('span', { class: 'dot ' + v, text: DAY_LETTER[i], title: `${DAY_SHORT[i]}: ${{ p: 'Present', a: 'Absent', t: 'Not checked in yet', f: 'Upcoming' }[v]}` })));
-    const tone = r.pct === null ? 'na' : r.pct >= 75 ? 'hi' : r.pct >= 50 ? 'mid' : 'lo';
-    const row = h('div', { class: 'wrow' + (r.name === pulseName ? ' pulse' : '') },
-      h('span', { class: 'avatar', text: r.name.charAt(0).toUpperCase() }),
-      h('div', { class: 'wname-box' }, h('b', { text: r.name }), h('small', null, `${r.section ? r.section + ', ' : ''}${r.count} of ${r.denom || 0} day${r.denom === 1 ? '' : 's'}`,
-        (runs.get(r.name) || 0) >= 2 ? h('span', { class: 'streak', text: `🔥 ${runs.get(r.name)}`, title: `${runs.get(r.name)} days in a row` }) : null)),
-      dots,
-      h('span', { class: 'pct ' + tone, text: r.pct === null ? '–' : r.pct + '%' }));
-    list.appendChild(row);
+    let w = weekRows.get(r.name);
+    if (!w) {
+      const meta = document.createTextNode(''), streak = h('span', { class: 'streak' });
+      const dots = DAY_SHORT.map(() => h('span', { class: 'dot' }));
+      const pct = h('span', { class: 'pct' });
+      const row = h('div', { class: 'wrow' }, h('span', { class: 'avatar', text: r.name.charAt(0).toUpperCase() }),
+        h('div', { class: 'wname-box' }, h('b', { text: r.name }), h('small', null, meta, streak)), h('div', { class: 'dots' }, ...dots), pct);
+      w = { row, meta, streak, dots, pct, key: '' };
+      weekRows.set(r.name, w);
+    }
+    const run = runs.get(r.name) || 0;
+    const key = [r.section, r.count, r.denom, r.pct, r.days.join(''), run].join('|');
+    if (key !== w.key) {   // something about this student changed: update just this row
+      w.key = key;
+      w.meta.data = `${r.section ? r.section + ', ' : ''}${r.count} of ${r.denom || 0} day${r.denom === 1 ? '' : 's'}`;
+      w.streak.style.display = run < 2 ? 'none' : '';
+      if (run >= 2) { w.streak.textContent = `🔥 ${run}`; w.streak.title = `${run} days in a row`; }
+      r.days.forEach((v, i) => { const d = w.dots[i]; d.className = 'dot ' + v; d.textContent = DAY_LETTER[i]; d.title = `${DAY_SHORT[i]}: ${{ p: 'Present', a: 'Absent', t: 'Not checked in yet', f: 'Upcoming' }[v]}`; });
+      w.pct.className = 'pct ' + (r.pct === null ? 'na' : r.pct >= 75 ? 'hi' : r.pct >= 50 ? 'mid' : 'lo');
+      w.pct.textContent = r.pct === null ? '–' : r.pct + '%';
+    }
+    if (r.name === pulseName) { w.row.classList.remove('pulse'); void w.row.offsetWidth; w.row.classList.add('pulse'); }
+    wanted.push(w.row);
   }
+  for (const name of weekRows.keys()) if (!st.rows.some(r => r.name === name)) weekRows.delete(name);
+  const cur = list.children;
+  if (cur.length !== wanted.length || wanted.some((el, i) => cur[i] !== el)) list.replaceChildren(...wanted);   // only when people were added/removed
 }
+const weekRows = new Map();
 function exportWeekCSV() {
   const st = weekStats(), label = { p: 'Present', a: 'Absent', t: '', f: '' };
   let csv = 'Name,Section,' + DAY_SHORT.join(',') + ',Days present,Days counted,Percentage\n';
@@ -1381,7 +1460,7 @@ async function saveEnrollmentName() {
   capturedDescriptorForSave = null; $('nameSection').classList.add('hidden');
   tracks.forEach(t => { t.name = null; });
   renderEnrolledList(); renderLog(); setStatus(`${name} enrolled.`, 'ok', 1500);
-  await persist();
+  enrDirty = true; await persist();
 }
 function cancelEnrollment() { capturedDescriptorForSave = null; $('nameSection').classList.add('hidden'); }
 async function deleteEnrollment(id) {
@@ -1389,7 +1468,7 @@ async function deleteEnrollment(id) {
   if (!confirm(`Remove ${e.name} and their face data?`)) return;
   enrollments = enrollments.filter(x => x.id !== id);
   tracks.forEach(t => { t.name = null; });
-  renderEnrolledList(); renderLog(); await persist();
+  renderEnrolledList(); renderLog(); enrDirty = true; await persist();
 }
 function renderEnrolledList() {
   const box = $('enrolledList'); box.replaceChildren();
@@ -1425,8 +1504,9 @@ function recordAttendance(name) {
   const now = new Date(), enr = enrollments.find(e => e.name === name);
   const photo = capturePhoto();
   const rec = { name, section: enr ? enr.section : '', date: now.toLocaleDateString(), time: now.toLocaleTimeString(), ts: now.getTime(), late: isLate(now) };
-  records.push(rec); highlightTs = rec.ts; presentCache.key = '';
-  later(() => { renderLog(); persist(); if (photo) putPhoto(rec.ts, photo); });   // after the thank-you animation starts; the photo stays on-device and goes to the Sheet
+  records.push(rec); markRecord(rec.ts); highlightTs = rec.ts; presentCache.key = '';
+  // after the thank-you animation starts, in separate small steps so the camera never stutters
+  later(() => { renderLog(); later(() => { persist(); if (photo) later(() => putPhoto(rec.ts, photo)); }); });
   if (syncEnabled()) {
     const payload = { ...rec, status: rec.late ? 'Late' : 'On time', token: SYNC_TOKEN }; if (photo) payload.image = photo;
     queueSync(payload);
@@ -1507,8 +1587,8 @@ function onSheetRejected(p, reason) {
         : /office hours/i.test(reason) ? `${first}'s check-in was outside office hours, so it was not saved.`
         : `${first}'s check-in was not saved (${reason}). Ask an admin.`;
   }
-  presentCache.key = ''; streakCache.key = '';
-  persist(); renderLog();
+  presentCache.key = ''; streakCache.key = ''; logDirty = true;
+  markRecord(p.ts); persist(); renderLog();
   statusHoldUntil = 0;
   setStatus('⚠ ' + msg, 'err', 9000);
 }
@@ -1522,20 +1602,34 @@ function renderLog() {
   lastCounts = counts;
   const pulse = highlightTs ? (records.find(r => r.ts === highlightTs) || {}).name : null;
   renderWeek(pulse);
-  const body = $('logBody'); body.replaceChildren();
-  if (!records.length) { body.appendChild(h('tr', null, h('td', { colSpan: 5, class: 'empty-state' }, h('div', { class: 'empty-ico', text: '📋' }), h('div', { text: 'No attendance yet. Students appear here as soon as they blink to check in.' })))); return; }
-  for (const r of records.slice().reverse().slice(0, 150)) {   // newest 150 rows on screen; CSV export has everything
-    const av = h('div', { class: 'avatar', text: (r.name || '?').charAt(0).toUpperCase() });
-    const row = h('tr', null, h('td', null, h('div', { class: 'namecell' }, av, h('span', { text: r.name }))), h('td', { text: r.section || '' }), h('td', { text: r.date }), h('td', { text: r.time }), h('td', null, r.sync === 'rejected' ? h('span', { class: 'chip-late', text: 'Not saved', title: r.reason || 'Refused by the Sheet' }) : (LATE_AFTER && r.late) ? h('span', { class: 'chip-late', text: 'Late' }) : h('span', { class: 'chip-ok', text: 'Present' })));
-    if (r.ts === highlightTs) row.className = 'new';
-    body.appendChild(row);
+  const body = $('logBody');
+  const last = records[records.length - 1], prev = records[records.length - 2];
+  if (!logDirty && logShown.count > 0 && records.length === logShown.count + 1 && prev && prev.ts === logShown.lastTs) {
+    // the usual case, one new check-in: add one row at the top instead of rebuilding all 150
+    body.prepend(logRow(last));
+    while (body.children.length > LOG_ROWS) body.lastElementChild.remove();
+  } else if (logDirty || records.length !== logShown.count || (last && last.ts) !== logShown.lastTs) {
+    body.replaceChildren();
+    if (!records.length) body.appendChild(h('tr', null, h('td', { colSpan: 5, class: 'empty-state' }, h('div', { class: 'empty-ico', text: '📋' }), h('div', { text: 'No attendance yet. Students appear here as soon as they blink to check in.' }))));
+    else { const frag = document.createDocumentFragment(); for (const r of records.slice(-LOG_ROWS).reverse()) frag.appendChild(logRow(r)); body.appendChild(frag); }
   }
+  logDirty = false; logShown = { count: records.length, lastTs: last ? last.ts : 0 };
   highlightTs = 0;
+}
+const LOG_ROWS = 150;   // newest rows on screen; the CSV export has everything
+let logShown = { count: 0, lastTs: 0 }, logDirty = true;
+function logRow(r) {
+  const av = h('div', { class: 'avatar', text: (r.name || '?').charAt(0).toUpperCase() });
+  const row = h('tr', null, h('td', null, h('div', { class: 'namecell' }, av, h('span', { text: r.name }))), h('td', { text: r.section || '' }), h('td', { text: r.date }), h('td', { text: r.time }), h('td', null, r.sync === 'rejected' ? h('span', { class: 'chip-late', text: 'Not saved', title: r.reason || 'Refused by the Sheet' }) : (LATE_AFTER && r.late) ? h('span', { class: 'chip-late', text: 'Late' }) : h('span', { class: 'chip-ok', text: 'Present' })));
+  if (r.ts === highlightTs) row.className = 'new';
+  return row;
 }
 async function clearRecords() {
   if (!(await askPin('clear'))) return;   // same passcode as enrolling
   if (!confirm('Delete ALL attendance records on this device? This cannot be undone.')) return;
-  records = []; presentCache.key = ''; streakCache.key = ''; renderLog(); await Promise.all([persist(), clearPhotos()]);
+  records = []; presentCache.key = ''; streakCache.key = ''; dayCache.clear(); renderLog();
+  recAll = true; await Promise.all([persist(), clearPhotos()]);
+  try { localStorage.removeItem(KEY.rec); } catch (e) {}
 }
 function exportCSV() {
   let csv = 'Name,Section,Date,Time,Status\n';
@@ -1608,6 +1702,7 @@ async function init() {
   $('splash').classList.add('out'); setTimeout(() => { $('splash').remove(); app.classList.remove('enter'); }, 700);
   unlockAudio();
   outboxReady = true; flushOutbox();   // send anything saved while the device was offline
+  setTimeout(() => later(pruneOldPhotos), 20000);   // tidy old device photos once things are quiet
   requestAnimationFrame(render);
   if (!camError) setStatus('Starting face engine…', 'wait');
 
