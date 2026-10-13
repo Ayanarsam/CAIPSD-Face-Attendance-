@@ -6,7 +6,15 @@ const PAGE_CACHE = 'rollcall-page-v3';
 // Versioned files that never change at the same URL: serve from the device first.
 const ASSET_HOSTS = ['cdn.jsdelivr.net', 'storage.googleapis.com', 'fonts.gstatic.com'];
 
-self.addEventListener('install', () => self.skipWaiting());
+// On install, save the page and its app code together, so the app opens offline straight away.
+self.addEventListener('install', (e) => {
+  self.skipWaiting();
+  e.waitUntil((async () => {
+    const page = new URL(self.registration.scope);
+    const res = await fetch(page, { cache: 'no-store', credentials: 'same-origin' });
+    if (res.ok && res.type === 'basic') await savePage(await caches.open(PAGE_CACHE), page, res);
+  })().catch(() => {}));
+});
 self.addEventListener('activate', (e) => {
   e.waitUntil((async () => {
     const keep = new Set([CACHE, PAGE_CACHE]);
@@ -15,13 +23,18 @@ self.addEventListener('activate', (e) => {
   })());
 });
 
+// The app's own files: the page and its code (app.js).
+const isAppCode = (url) => url.origin === self.location.origin && /\.js$/.test(url.pathname) && !/\/sw\.js$/.test(url.pathname);
+
 self.addEventListener('fetch', (e) => {
   const req = e.request;
   if (req.method !== 'GET') return;                       // check-ins (POST) always go straight to the network
   const url = new URL(req.url);
 
   if (req.mode === 'navigate' && url.origin === self.location.origin) {
-    e.respondWith(pageFirst(e));
+    e.respondWith(savedFirst(e, url.pathname, true));
+  } else if (isAppCode(url)) {
+    e.respondWith(savedFirst(e, url.pathname + url.search, false));
   } else if (ASSET_HOSTS.includes(url.hostname)) {
     e.respondWith(deviceFirst(req));
   } else if (url.hostname === 'fonts.googleapis.com') {
@@ -42,19 +55,19 @@ async function deviceFirst(req, refresh) {
   return res;
 }
 
-// The page itself: open the saved copy instantly, fetch the newest version in the background,
+// The page and its code: open the saved copy instantly, fetch the newest version in the background,
 // and tell the app when a newer version has arrived (it reloads itself when nobody is at the camera).
 // The worker also remembers which version is on screen ("shown"), so an update is never missed.
-async function pageFirst(e) {
+async function savedFirst(e, path, isPage) {
   const cache = await caches.open(PAGE_CACHE);
-  const path = new URL(e.request.url).pathname;
   const key = new Request(path);
   const hit = await cache.match(key);
   const oldText = hit ? await hit.clone().text() : null;
   const net = fetch(e.request.url, { cache: 'no-store', credentials: 'same-origin' }).then(async res => {
     if (res.ok && res.type === 'basic') {
       const fresh = await res.clone().text();
-      await cache.put(key, res.clone());
+      if (isPage) await savePage(cache, new URL(e.request.url), res.clone(), fresh).catch(() => {});
+      else await cache.put(key, res.clone());
       if (oldText === null) await markShown(cache, path, fresh);   // first visit: this download is what's on screen
       else if (oldText !== fresh) notifyUpdate();
     }
@@ -67,6 +80,21 @@ async function pageFirst(e) {
   return net;                                                    // first visit: nothing saved yet
 }
 
+// Save a page only after the code it loads is saved too, so the device never holds a page without its code.
+async function savePage(cache, pageUrl, res, text) {
+  if (text === undefined) text = await res.clone().text();
+  for (const m of text.matchAll(/<script[^>]*\ssrc="([^"]+)"/g)) {
+    const u = new URL(m[1], pageUrl);
+    if (!isAppCode(u)) continue;
+    const k = new Request(u.pathname + u.search);
+    if (await cache.match(k)) continue;
+    const r = await fetch(u, { cache: 'no-store', credentials: 'same-origin' });
+    if (!r.ok || r.type !== 'basic') throw new Error('app code not saved: ' + u.pathname);
+    await cache.put(k, r);
+  }
+  await cache.put(new Request(pageUrl.pathname), res);
+}
+
 const shownKey = (path) => new Request(path + '?shown');
 const markShown = (cache, path, text) => cache.put(shownKey(path), new Response(text, { headers: { 'Content-Type': 'text/plain' } }));
 
@@ -74,22 +102,31 @@ async function notifyUpdate() {
   for (const c of await self.clients.matchAll({ type: 'window' })) c.postMessage({ type: 'page-updated' });
 }
 
-// The office device stays open all day, so the app asks every 15 minutes: is there a newer page on GitHub?
-// If the newest page differs from the one on screen, it is saved on the device and the app is told to reload
-// (it does so when nobody is at the camera). If that message is missed, the next check sends it again.
+// The office device stays open all day, so the app asks every 15 minutes: is there a newer version on GitHub?
+// It sends the files on screen (the page and its code). If any differs from the newest copy, the newest is saved
+// on the device and the app is told to reload (it does so when nobody is at the camera).
+// If that message is missed, the next check sends it again.
 self.addEventListener('message', (e) => {
   if (e.data && e.data.type === 'check-update' && e.source && e.source.url) {
-    e.waitUntil(checkForUpdate(new URL(e.source.url).pathname).catch(() => {}));
+    const files = Array.isArray(e.data.files) && e.data.files.length ? e.data.files : [new URL(e.source.url).pathname];
+    e.waitUntil(checkForUpdate(files.filter(f => typeof f === 'string' && f.startsWith('/')).slice(0, 4)).catch(() => {}));
   }
 });
-async function checkForUpdate(path) {
+async function checkForUpdate(files) {
   const cache = await caches.open(PAGE_CACHE);
-  const key = new Request(path);
-  const res = await fetch(path, { cache: 'no-store', credentials: 'same-origin' });
-  if (!res.ok || res.type !== 'basic') return;
-  const fresh = await res.clone().text();
-  const saved = await cache.match(key);
-  if (!saved || (await saved.text()) !== fresh) await cache.put(key, res);
-  const shown = await cache.match(shownKey(path));
-  if (shown && (await shown.text()) !== fresh) notifyUpdate();
+  let changed = false;
+  for (const path of files) {
+    const url = new URL(path, self.location.origin);
+    const res = await fetch(url, { cache: 'no-store', credentials: 'same-origin' });
+    if (!res.ok || res.type !== 'basic') continue;
+    const fresh = await res.clone().text();
+    const key = new Request(path);
+    const saved = await cache.match(key);
+    if (!saved || (await saved.text()) !== fresh) {
+      if (isAppCode(url)) await cache.put(key, res); else await savePage(cache, url, res, fresh);
+    }
+    const shown = await cache.match(shownKey(path));
+    if (shown && (await shown.text()) !== fresh) changed = true;
+  }
+  if (changed) notifyUpdate();
 }
