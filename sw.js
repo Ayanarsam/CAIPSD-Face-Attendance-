@@ -95,6 +95,16 @@ async function savePage(cache, pageUrl, res, text) {
     await cache.put(k, r);
   }
   await cache.put(new Request(pageUrl.pathname), res);
+  await pruneOldCode(cache);
+}
+
+// Keep only the 3 newest versions of the app code on the device (each update adds one).
+async function pruneOldCode(cache) {
+  const code = (await cache.keys()).filter(r => isAppCode(new URL(r.url)));
+  for (const r of code.slice(0, Math.max(0, code.length - 3))) {
+    const u = new URL(r.url);
+    await cache.delete(r); await cache.delete(shownKey(u.pathname + u.search));
+  }
 }
 
 const shownKey = (path) => new Request(path + '?shown');

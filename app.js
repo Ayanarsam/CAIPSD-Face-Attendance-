@@ -349,6 +349,7 @@ async function loadMediapipe() {
 let hadFace = false, faScan = 0, faWide = false, faMiss = 0;
 async function faLoop() {
   if (engine !== 'faceapi') return;
+  loopBeat = performance.now();
   try { await faFrame(); engineOk(); } catch (e) { console.warn(e); engineFailed(e); }
   setTimeout(faLoop, hadFace ? (isLite() ? 30 : 0) : 150);
 }
@@ -377,6 +378,7 @@ let lastVideoTime = -1, lastFaceAt = -Infinity;   // no face seen yet
 let detCost = 15;
 function mpLoop() {
   if (engine !== 'mp') return;
+  loopBeat = performance.now();
   const t0 = performance.now();
   try { mpStep(); } catch (e) { console.warn(e); }
   const cost = performance.now() - t0;
@@ -1007,10 +1009,11 @@ async function queueSync(payload) {
 }
 // Sends one check-in and reads the Sheet's reply: {result: 'saved' | 'duplicate' | 'rejected' | 'busy' | 'error', reason}.
 // blind = true sends without reading the reply (only used if replies can't be read on this device).
+// sentAt (this phone's clock when sending) lets the Sheet correct the check-in time if the phone's clock is wrong.
 async function sendToSheet(payload, blind) {
-  const ac = new AbortController(), t = setTimeout(() => ac.abort(), 20000);
+  const ac = new AbortController(), t = setTimeout(() => ac.abort(), 45000);   // the Sheet can take a while when many check in at once
   try {
-    const res = await fetch(GOOGLE_SHEET_WEB_APP_URL, { method: 'POST', mode: blind ? 'no-cors' : 'cors', headers: { 'Content-Type': 'text/plain' }, body: JSON.stringify({ ...payload, token: SYNC_TOKEN }), referrerPolicy: 'no-referrer', credentials: 'omit', signal: ac.signal });
+    const res = await fetch(GOOGLE_SHEET_WEB_APP_URL, { method: 'POST', mode: blind ? 'no-cors' : 'cors', headers: { 'Content-Type': 'text/plain' }, body: JSON.stringify({ ...payload, token: SYNC_TOKEN, sentAt: Date.now() }), referrerPolicy: 'no-referrer', credentials: 'omit', signal: ac.signal });
     if (blind) return { result: 'sent' };
     const text = await res.text();
     try { const j = JSON.parse(text); if (j && typeof j.result === 'string') return { result: j.result, reason: typeof j.reason === 'string' ? j.reason : '' }; } catch (e) {}
@@ -1035,7 +1038,11 @@ async function flushOutbox() {
       catch (e) { if (navigator.onLine && e.name !== 'AbortError') replyFails++; console.warn('No reply from the Sheet, will retry', e); break; }
       if (r.result === 'busy' || r.result === 'error') { console.warn('Sheet could not save it yet, will retry', r); break; }   // stays on the device
       replyFails = 0;
-      await outboxTx('readwrite', s => s.delete(k));   // saved, already there, refused, or sent blind
+      if (r.result === 'sent') {   // sent without a reply: we can't know it arrived, so it goes out 3 times (repeats are ignored)
+        payload.blindSends = (payload.blindSends || 0) + 1;
+        if (payload.blindSends < 3) { try { const sealed = await seal(payload); await outboxTx('readwrite', s => s.put(sealed, k)); } catch (e) {} continue; }
+      }
+      await outboxTx('readwrite', s => s.delete(k));   // saved, already there, refused, or sent blind 3 times
       if (r.result === 'rejected') onSheetRejected(payload, r.reason);
       refreshSyncPill();
     }
@@ -1129,6 +1136,7 @@ function bgVector(c) {
 function bgImage(src) { return new Promise((res, rej) => { const im = new Image(); im.onload = () => res(im); im.onerror = rej; im.src = src; }); }
 async function loadBackgroundCheck() {
   if (bgEmbedder || bgLoading) return;
+  if ((navigator.deviceMemory || 8) <= 1 || (navigator.hardwareConcurrency || 8) <= 2) return;   // very small phones (1 GB): keep memory for face checks
   bgLoading = true;
   try {
     const { ImageEmbedder, FilesetResolver } = await import("https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@0.10.14/vision_bundle.mjs");
@@ -1244,6 +1252,8 @@ async function init() {
   $('splash').classList.add('out'); setTimeout(() => { $('splash').remove(); app.classList.remove('enter'); }, 700);
   unlockAudio();
   outboxReady = true; flushOutbox();   // send anything saved while the device was offline
+  // ask the browser never to clear this app's data (enrolled faces, unsent check-ins) when the phone runs low on space
+  try { if (navigator.storage && navigator.storage.persist) navigator.storage.persisted().then(p => p || navigator.storage.persist()).catch(() => {}); } catch (e) {}
   setTimeout(() => later(pruneOldPhotos), 20000);   // tidy old device photos once things are quiet
   requestAnimationFrame(render);
   if (!camError) setStatus('Starting face engine…', 'wait');
@@ -1399,6 +1409,24 @@ async function keepAwake() {
 document.addEventListener('visibilitychange', keepAwake);
 document.addEventListener('pointerdown', keepAwake, { passive: true });
 keepAwake();
+
+// Watchdog: the face engine runs in a loop many times a second. If that loop ever stops (a crashed graphics
+// driver, a hung model) while the camera is on screen, the page reloads itself when nobody is at the camera.
+let loopBeat = performance.now(), loopSuspect = false;
+setInterval(() => {
+  const camOn = video && video.srcObject && video.srcObject.active;
+  if (!engineReady || document.hidden || !camOn) { loopBeat = Math.max(loopBeat, performance.now() - 5000); loopSuspect = false; return; }
+  if (performance.now() - loopBeat < 20000) { loopSuspect = false; return; }
+  // seen stopped twice in a row (a phone that only froze for a moment has caught up by the second look)
+  if (!loopSuspect) { loopSuspect = true; return; }
+  loopSuspect = false; loopBeat = performance.now();
+  let last = 0; try { last = Number(sessionStorage.getItem('watchdogAt')) || 0; } catch (e) {}
+  if (Date.now() - last < 10 * 60 * 1000) return;   // at most one watchdog reload every 10 minutes
+  try { sessionStorage.setItem('watchdogAt', String(Date.now())); } catch (e) {}
+  console.error('Face engine loop stopped, reloading');
+  reloadWhenFree();
+}, 5000);
+window.addEventListener('unhandledrejection', (e) => console.warn('Unhandled', e.reason));
 
 // keep models and engines on this device after the first visit (faster start, opens offline)
 // Auto-update: the office device stays open all day, so check GitHub for a new version every 15 minutes
