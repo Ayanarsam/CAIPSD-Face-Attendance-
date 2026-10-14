@@ -1,0 +1,55 @@
+<!doctype html>
+<meta charset="utf-8">
+<title>Background check test</title>
+<pre id="out">running…</pre>
+<script type="module">
+// Temporary test of the office background check with the real MediaPipe model. Same steps as app.js.
+const NEGS = ["curtain_darkblue.jpg", "curtain_navy.jpg", "curtain_purple.jpg", "curtain_royal.jpg", "curtain_skyblue.jpg", "curtain_violetblue.jpg", "lines_darkblue.jpg", "lines_navy.jpg", "lines_purple.jpg", "lines_royal.jpg", "lines_skyblue.jpg", "lines_violetblue.jpg", "outdoor1.jpg", "outdoor2.jpg", "pattern_darkblue.jpg", "pattern_navy.jpg", "pattern_purple.jpg", "pattern_royal.jpg", "pattern_skyblue.jpg", "pattern_violetblue.jpg", "photo_astronaut.jpg", "photo_chelsea.jpg", "photo_coffee.jpg", "photo_rocket.jpg", "photo_sk0.jpg", "photo_sk1.jpg", "plain_beige.jpg", "plain_brick.jpg", "plain_cream.jpg", "plain_darkblue.jpg", "plain_grey.jpg", "plain_mint.jpg", "plain_navy.jpg", "plain_pink.jpg", "plain_purple.jpg", "plain_royal.jpg", "plain_skyblue.jpg", "plain_teal.jpg", "plain_violetblue.jpg", "plain_white.jpg", "wall_beige.jpg", "wall_brick.jpg", "wall_cream.jpg", "wall_darkblue.jpg", "wall_grey.jpg", "wall_mint.jpg", "wall_navy.jpg", "wall_pink.jpg", "wall_purple.jpg", "wall_royal.jpg", "wall_skyblue.jpg", "wall_teal.jpg", "wall_violetblue.jpg", "wall_white.jpg"];
+const out = document.getElementById('out');
+const log = (t) => { out.textContent += '\n' + t; };
+const BG_W = 240, BG_H = 320, DIR = '../assets/office-bg/';
+const { ImageEmbedder, FilesetResolver } = await import("https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@0.10.14/vision_bundle.mjs");
+const fs = await FilesetResolver.forVisionTasks("https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@0.10.14/wasm");
+const t0 = performance.now();
+const emb = await ImageEmbedder.createFromOptions(fs, { baseOptions: { modelAssetPath: 'https://storage.googleapis.com/mediapipe-models/image_embedder/mobilenet_v3_small/float32/1/mobilenet_v3_small.tflite', delegate: 'CPU' }, runningMode: 'IMAGE' });
+log('model loaded in ' + Math.round(performance.now() - t0) + ' ms');
+const c = document.createElement('canvas'); c.width = BG_W; c.height = BG_H;
+const g = c.getContext('2d', { willReadFrequently: true });
+const grey = () => { g.filter = 'none'; g.fillStyle = '#808080'; g.fillRect(BG_W * 0.22, BG_H * 0.15, BG_W * 0.58, BG_H); };
+let embMs = 0, embN = 0;
+function vec() { const t = performance.now(); const v = emb.embed(c).embeddings[0].floatEmbedding; embMs += performance.now() - t; embN++;
+  let n = 0; for (const x of v) n += x * x; n = Math.sqrt(n) || 1; return Float32Array.from(v, x => x / n); }
+const img = (s) => new Promise((res, rej) => { const i = new Image(); i.onload = () => res(i); i.onerror = rej; i.src = s; });
+const crops = (im) => { const IW = im.naturalWidth, IH = im.naturalHeight, r = [];
+  for (const hs of [0.5, 0.7, 0.95]) { const ch = IH * hs, cw = Math.min(IW, ch * 0.75); for (let xi = 0; xi < 4; xi++) r.push([(IW - cw) * xi / 3, (IH - ch) * 0.3, cw, ch]); } return r; };
+function draw(im, crop, filt) { g.filter = filt || 'none'; if (crop) g.drawImage(im, ...crop, 0, 0, BG_W, BG_H); else g.drawImage(im, 0, 0, BG_W, BG_H); grey(); }
+const refs = [], ims = {};
+for (const n of ['selfie1', 'selfie2', 'selfie3']) { ims[n] = await img(DIR + n + '.jpg'); draw(ims[n]); refs.push({ src: n, v: vec() }); }
+for (const n of ['wide1', 'wide2']) { ims[n] = await img(DIR + n + '.jpg'); for (const cr of crops(ims[n])) { draw(ims[n], cr); refs.push({ src: n, v: vec() }); } }
+log('office views: ' + refs.length);
+const score = (v, excl) => { let b = 0; for (const r of refs) if (r.src !== excl) { let d = 0; for (let i = 0; i < v.length; i++) d += v[i] * r.v[i]; if (d > b) b = d; } return b; };
+const V = [['plain', ''], ['dark', 'brightness(0.6)'], ['bright', 'brightness(1.4)'], ['blur', 'blur(3px)'], ['warm', 'sepia(0.35) saturate(1.2)'], ['dull', 'saturate(0.6)'], ['hue+12', 'hue-rotate(12deg)'], ['hue-12', 'hue-rotate(-12deg)']];
+const pos = [], neg = [];
+for (const n of ['selfie1', 'selfie2', 'selfie3']) for (const [vn, f] of V) { draw(ims[n], null, f); pos.push([n + ' ' + vn, score(vec(), n)]); }
+for (const n of ['wide1', 'wide2']) { const cs = crops(ims[n]); for (const ci of [1, 5, 10]) for (const [vn, f] of V.slice(0, 5)) { draw(ims[n], cs[ci], f); pos.push([n + ' crop' + ci + ' ' + vn, score(vec(), n)]); } }
+for (const f of NEGS) { const im = await img('neg/' + f); for (const [vn, fl] of [['plain', ''], ['dark', 'brightness(0.7)'], ['blur', 'blur(3px)']]) { draw(im, null, fl); neg.push([f.replace('.jpg', '') + ' ' + vn, score(vec(), null)]); } }
+const r3 = (x) => Math.round(x * 1000) / 1000;
+pos.sort((a, b) => a[1] - b[1]); neg.sort((a, b) => b[1] - a[1]);
+const cls = (n) => n.split('_')[0];
+const isBlue = (n) => /royal|navy|darkblue|violetblue|purple|teal|skyblue/.test(n);
+const everyday = neg.filter(x => { const base = x[0].split(' ')[0], k = base.split('_')[0]; return ['wall', 'plain', 'photo'].includes(k) || base.startsWith('outdoor'); });
+const nonBlue = everyday.filter(x => !isBlue(x[0]));
+const q = (a, p) => a[Math.floor((a.length - 1) * p)][1];
+log('embed time: ' + (embMs / embN).toFixed(1) + ' ms each (' + embN + ')');
+log('POSITIVES (office): min ' + r3(pos[0][1]) + ' p10 ' + r3(q(pos, 0.1)) + ' median ' + r3(q(pos, 0.5)));
+log('  selfies only: min ' + r3(Math.min(...pos.filter(x => x[0].startsWith('selfie')).map(x => x[1]))));
+log('  lowest: ' + pos.slice(0, 8).map(x => x[0] + '=' + r3(x[1])).join(', '));
+log('NEGATIVES: max ' + r3(neg[0][1]) + ' median ' + r3(q(neg.slice().reverse(), 0.5)));
+log('  non-blue everyday max: ' + r3(nonBlue[0][1]) + ' (' + nonBlue.slice(0, 4).map(x => x[0] + '=' + r3(x[1])).join(', ') + ')');
+log('  blue everyday max: ' + r3(everyday.filter(x => isBlue(x[0]))[0][1]));
+log('  highest: ' + neg.slice(0, 10).map(x => x[0] + '=' + r3(x[1])).join(', '));
+for (const t of [0.6, 0.65, 0.7, 0.75, 0.8, 0.85]) {
+  log('cut ' + t + ': office pass ' + Math.round(100 * pos.filter(x => x[1] >= t).length / pos.length) + '%, non-blue rooms pass ' + Math.round(100 * nonBlue.filter(x => x[1] >= t).length / nonBlue.length) + '%, all look-alikes pass ' + Math.round(100 * neg.filter(x => x[1] >= t).length / neg.length) + '%');
+}
+log('DONE');
+</script>
