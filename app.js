@@ -1231,13 +1231,18 @@ function renderLeaderboard() {
   const mine = new Set(enrollments.map(e => key(e.name)));
   const rows = p.rows.slice(0, 60).map(r => ({ rank: Number(r.rank) || 0, name: clean(r.name, 60) || '?', dept: clean(r.dept, 30), days: Number(r.days) || 0,
     pct: Number(r.pct) || 0, avg: clean(r.avg, 12), streak: Number(r.streak) || 0 }));
+  // same number of days present = same rank (1, 1, 1, 2 ...), worked out here so it never depends on the Sheet's version
+  rows.sort((a, b) => b.days - a.days);   // stable: keeps the Sheet's order (earlier arrival first) within a tie
+  rows.forEach((r, i) => { r.rank = i === 0 ? 1 : (r.days === rows[i - 1].days ? rows[i - 1].rank : rows[i - 1].rank + 1); });
   if (!rows.length) { podium.replaceChildren(); list.replaceChildren(h('div', { class: 'empty', text: 'No check-ins yet in this period.' })); return; }
   const you = (r) => mine.has(key(r.name)) ? h('span', { class: 'you', text: 'You' }) : null;
   const daysTxt = (r) => `${r.days}/${wd} day${wd === 1 ? '' : 's'}`;
-  const pod = (r, cls, medal) => r ? h('div', { class: 'pod ' + cls + (mine.has(key(r.name)) ? ' me' : '') },
-    h('div', { class: 'medal', text: medal }), h('div', { class: 'avatar', text: r.name.charAt(0).toUpperCase() }),
+  // medals follow the rank, so people tied at #1 all get gold
+  const medalOf = (rk) => rk === 1 ? '🥇' : rk === 2 ? '🥈' : rk === 3 ? '🥉' : '#' + rk;
+  const pod = (r, cls) => r ? h('div', { class: 'pod ' + cls + (mine.has(key(r.name)) ? ' me' : '') },
+    h('div', { class: 'medal', text: medalOf(r.rank) }), h('span', { class: 'pod-rk', text: '#' + r.rank }), h('div', { class: 'avatar', text: r.name.charAt(0).toUpperCase() }),
     h('b', { text: r.name }), h('small', { text: r.dept || '—' }), h('span', { class: 'pts', text: daysTxt(r) }), you(r)) : h('div');
-  podium.replaceChildren(pod(rows[1], 'second', '🥈'), pod(rows[0], 'first', '🥇'), pod(rows[2], 'third', '🥉'));
+  podium.replaceChildren(pod(rows[1], 'second'), pod(rows[0], 'first'), pod(rows[2], 'third'));
   list.replaceChildren(...rows.slice(3).map(r => h('div', { class: 'lrow' + (mine.has(key(r.name)) ? ' me' : '') },
     h('span', { class: 'rk', text: String(r.rank) }), h('span', { class: 'avatar', text: r.name.charAt(0).toUpperCase() }),
     h('div', { class: 'wname-box' }, h('b', null, r.name, you(r)), h('small', { text: `${r.dept ? r.dept + ' · ' : ''}avg\u00a0${r.avg.replace(' ', '\u00a0')}${r.streak >= 2 ? ' · 🔥\u00a0' + r.streak : ''}` })),
