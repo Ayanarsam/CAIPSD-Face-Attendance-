@@ -35,6 +35,8 @@ self.addEventListener('fetch', (e) => {
     e.respondWith(savedFirst(e, url.pathname, true));
   } else if (isAppCode(url)) {
     e.respondWith(savedFirst(e, url.pathname + url.search, false));
+  } else if (url.origin === self.location.origin && url.pathname.includes('/assets/')) {
+    e.respondWith(deviceFirst(req, true));                  // office photos for the background check: saved, refreshed quietly
   } else if (ASSET_HOSTS.includes(url.hostname)) {
     e.respondWith(deviceFirst(req));
   } else if (url.hostname === 'fonts.googleapis.com') {

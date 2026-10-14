@@ -549,7 +549,7 @@ function updateTracks(faces, t) {
       else if (tr.blinkAt && t - tr.blinkAt < BLINK_WINDOW_MS) {
         if (tr.closed && t - tr.blinkAt < PHOTO_WAIT_MS) state = 'blinked';   // wait a moment so the photo has open eyes
         else {
-          const { rec, photo } = recordAttendance(tr.name);
+          const { rec, photo } = recordAttendance(tr.name, ob);
           tr.blinkAt = 0; state = 'recorded'; label = tr.name + '  ✓';
           showSuccess(rec, photo);
         }
@@ -971,15 +971,17 @@ function isLate(d) {
   const m = /^(\d{1,2}):(\d{2})$/.exec(LATE_AFTER || ''); if (!m) return false;
   return d.getHours() * 60 + d.getMinutes() > (+m[1]) * 60 + (+m[2]);
 }
-function recordAttendance(name) {
+function recordAttendance(name, face) {
   const now = new Date(), enr = enrollments.find(e => e.name === name);
   const photo = capturePhoto();
+  const bg = backgroundScore(face);
   const rec = { name, section: enr ? enr.section : '', date: now.toLocaleDateString(), time: now.toLocaleTimeString(), ts: now.getTime(), late: isLate(now) };
   records.push(rec); markRecord(rec.ts); highlightTs = rec.ts; presentCache.key = '';
   // after the thank-you animation starts, in separate small steps so the camera never stutters
   later(() => { renderLog(); later(() => { persist(); if (photo) later(() => putPhoto(rec.ts, photo)); }); });
   if (syncEnabled()) {
     const payload = { ...rec, status: rec.late ? 'Late' : 'On time', token: SYNC_TOKEN }; if (photo) payload.image = photo;
+    if (bg !== null) payload.bg = bg;
     queueSync(payload);
   }
   return { rec, photo };
@@ -1056,6 +1058,7 @@ function onSheetRejected(p, reason) {
     if (rec) { rec.sync = 'rejected'; rec.reason = reason; }
     msg = /roster/i.test(reason) ? `${first} is not on the roster, so attendance was not saved. Ask an admin to add you.`
         : /office hours/i.test(reason) ? `${first}'s check-in was outside office hours, so it was not saved.`
+        : /CAIPSD office/i.test(reason) ? `${first}'s check-in was not saved: please check in in front of the CAIPSD wall.`
         : `${first}'s check-in was not saved (${reason}). Ask an admin.`;
   }
   presentCache.key = ''; streakCache.key = ''; logDirty = true;
@@ -1107,6 +1110,74 @@ function exportCSV() {
   records.forEach(r => { csv += [r.name, r.section, r.date, r.time, r.sync === 'rejected' ? 'Not saved (' + (r.reason || 'refused') + ')' : (LATE_AFTER && r.late) ? 'Late' : 'Present'].map(csvCell).join(',') + '\n'; });
   downloadText(csv, 'attendance_' + localDate(new Date()) + '.csv', 'text/csv');
 }
+
+/* ---------- office background check (watch mode) ----------
+   Every check-in gets a score for how much the picture around the person looks like the CAIPSD wall
+   (1 = same, 0 = nothing alike). MediaPipe's picture model compares it with the office photos in assets/office-bg/
+   (the person there is greyed out). The phone only measures; the Sheet records the score and decides
+   (Script property BG_MIN). The model loads quietly after the face engine is ready. */
+const BG_MODEL = 'https://storage.googleapis.com/mediapipe-models/image_embedder/mobilenet_v3_small/float32/1/mobilenet_v3_small.tflite';
+const BG_DIR = 'assets/office-bg/';
+const BG_W = 240, BG_H = 320;   // office photos and check-ins are compared at this size (portrait selfie shape)
+let bgEmbedder = null, bgRefs = null, bgLoading = false, bgCanvas = null;
+function bgGrey(g, x0, y0, x1, y1) { g.fillStyle = '#808080'; g.fillRect(x0, y0, x1 - x0, y1 - y0); }
+function bgVector(c) {
+  const e = bgEmbedder.embed(c).embeddings[0];
+  const v = e.floatEmbedding; let n = 0; for (const x of v) n += x * x; n = Math.sqrt(n) || 1;
+  return Float32Array.from(v, x => x / n);
+}
+function bgImage(src) { return new Promise((res, rej) => { const im = new Image(); im.onload = () => res(im); im.onerror = rej; im.src = src; }); }
+async function loadBackgroundCheck() {
+  if (bgEmbedder || bgLoading) return;
+  bgLoading = true;
+  try {
+    const { ImageEmbedder, FilesetResolver } = await import("https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@0.10.14/vision_bundle.mjs");
+    const fs = await FilesetResolver.forVisionTasks("https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@0.10.14/wasm");
+    bgEmbedder = await ImageEmbedder.createFromOptions(fs, { baseOptions: { modelAssetPath: BG_MODEL, delegate: 'CPU' }, runningMode: 'IMAGE' });
+    const c = document.createElement('canvas'); c.width = BG_W; c.height = BG_H;
+    const g = c.getContext('2d', { willReadFrequently: true }), refs = [];
+    // office selfies (person already greyed out)
+    for (const n of ['selfie1', 'selfie2', 'selfie3']) {
+      const im = await bgImage(BG_DIR + n + '.jpg'); g.drawImage(im, 0, 0, BG_W, BG_H); refs.push(bgVector(c)); await timeout(15);
+    }
+    // the whole wall, cut into selfie-sized pieces, with the middle greyed out where a person would stand
+    for (const n of ['wide1', 'wide2']) {
+      const im = await bgImage(BG_DIR + n + '.jpg'), IW = im.naturalWidth, IH = im.naturalHeight;
+      for (const hs of [0.5, 0.7, 0.95]) {
+        const ch = IH * hs, cw = Math.min(IW, ch * 0.75);
+        for (let xi = 0; xi < 4; xi++) {
+          g.drawImage(im, (IW - cw) * xi / 3, (IH - ch) * 0.3, cw, ch, 0, 0, BG_W, BG_H);
+          bgGrey(g, BG_W * 0.22, BG_H * 0.15, BG_W * 0.80, BG_H);
+          refs.push(bgVector(c)); await timeout(15);
+        }
+      }
+    }
+    bgRefs = refs;
+    console.info('Background check ready (' + refs.length + ' office views)');
+  } catch (e) { console.warn('Background check unavailable', e); bgEmbedder = null; bgRefs = null; }
+  finally { bgLoading = false; }
+}
+// Score of the current camera picture; face = the person's face box in video pixels. null = can't tell.
+function backgroundScore(face) {
+  if (!bgRefs || !bgEmbedder || !video || !video.videoWidth || !face) return null;
+  try {
+    const vw = video.videoWidth, vh = video.videoHeight;
+    // the selfie-shaped part of the picture around the face (landscape cameras are cut to portrait)
+    let sw = vw, sh = vh;
+    if (vw / vh > BG_W / BG_H) sw = vh * BG_W / BG_H; else sh = vw * BG_H / BG_W;
+    const sx = Math.max(0, Math.min(vw - sw, face.cx - sw / 2)), sy = Math.max(0, Math.min(vh - sh, face.cy - sh * 0.4));
+    const c = bgCanvas || (bgCanvas = document.createElement('canvas')); c.width = BG_W; c.height = BG_H;
+    const g = c.getContext('2d', { willReadFrequently: true }), k = BG_W / sw;
+    g.drawImage(video, sx, sy, sw, sh, 0, 0, BG_W, BG_H);
+    // grey out the person: the face and everything below it
+    bgGrey(g, (face.cx - 0.95 * face.w - sx) * k, (face.cy - 0.9 * face.h - sy) * k, (face.cx + 0.95 * face.w - sx) * k, BG_H);
+    const v = bgVector(c);
+    let best = 0;
+    for (const r of bgRefs) { let d = 0; for (let i = 0; i < v.length; i++) d += v[i] * r[i]; if (d > best) best = d; }
+    return Math.round(Math.max(0, Math.min(1, best)) * 1000) / 1000;
+  } catch (e) { console.warn('Background score failed', e); return null; }
+}
+
 
 /* ---------- views ---------- */
 function setMode(m) {
@@ -1194,7 +1265,7 @@ async function init() {
   faLoop();
   recogFile
     .then(warmIdentity)   // prepares the exact recognition steps used at check-in, so the first person never hits a freeze
-    .then(() => { recogReady = true; tracks.forEach(t => { t.name = null; }); })
+    .then(() => { recogReady = true; tracks.forEach(t => { t.name = null; }); setTimeout(() => later(loadBackgroundCheck), 4000); })
     .catch(err => { console.error('Recognition model failed', err); recogFailed = true; });
   perfFrom = performance.now() + 6000;   // ignore start-up warm-up when judging speed
 }
