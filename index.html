@@ -286,6 +286,30 @@
   .empty-ico { font-size: 34px; margin-bottom: 8px; }
 
 
+  /* Leaderboard */
+  .seg { display: flex; flex-shrink: 0; padding: 3px; border-radius: 999px; background: rgba(13,26,54,.06); }
+  .seg-b { border: 0; background: none; font: inherit; font-size: 12.5px; font-weight: 700; color: var(--ink-soft); padding: 6px 13px; border-radius: 999px; cursor: pointer; transition: background .2s, color .2s; }
+  .seg-b.on { background: #fff; color: var(--brand); box-shadow: 0 2px 6px rgba(2,10,40,.12); }
+  .podium { display: grid; grid-template-columns: 1fr 1.15fr 1fr; align-items: end; gap: 10px; margin-top: 16px; }
+  .podium:empty { display: none; }
+  .pod { text-align: center; padding: 14px 8px 12px; border-radius: 20px; background: rgba(255,255,255,.5); border: 1px solid rgba(255,255,255,.8); min-width: 0; }
+  .pod.first { padding-top: 20px; background: linear-gradient(180deg, rgba(255,236,170,.8), rgba(255,255,255,.55)); border-color: rgba(201,162,39,.4); }
+  .pod .medal { font-size: 26px; line-height: 1; }
+  .pod.first .medal { font-size: 32px; }
+  .pod .avatar { margin: 8px auto 6px; width: 42px; height: 42px; font-size: 16px; }
+  .pod b { display: block; font-size: 13.5px; font-weight: 800; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .pod small { display: block; font-size: 11.5px; color: var(--ink-soft); font-weight: 600; margin-top: 2px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .pod .pts { display: inline-block; margin-top: 7px; padding: 3px 9px; border-radius: 999px; background: rgba(29,82,194,.1); color: var(--brand); font-size: 12px; font-weight: 800; }
+  .lb-list { margin-top: 12px; max-height: 340px; overflow: auto; -webkit-overflow-scrolling: touch; }
+  .lrow { display: grid; grid-template-columns: 24px 34px minmax(0, 1fr) auto; align-items: center; gap: 10px; padding: 8px 10px; border-radius: 16px; }
+  .lrow + .lrow { margin-top: 2px; }
+  .lrow .rk { font-weight: 800; color: var(--ink-soft); text-align: center; font-size: 13px; }
+  .lrow .lr-end { text-align: right; }
+  .lrow .lr-end b { display: block; font-size: 13px; font-weight: 800; color: var(--brand); }
+  .lrow .lr-end small { display: block; font-size: 11.5px; color: var(--ink-soft); font-weight: 600; }
+  .lrow.me, .pod.me { box-shadow: inset 0 0 0 2px rgba(29,82,194,.4); background: rgba(232,240,255,.75); }
+  .you { display: inline-block; margin-left: 6px; padding: 1px 7px; border-radius: 999px; background: var(--brand-2); color: #fff; font-size: 10.5px; font-weight: 800; vertical-align: 1px; }
+
   /* Weekly attendance */
   .week-head { display: flex; align-items: flex-start; justify-content: space-between; gap: 12px; }
   .week-head h2 { margin: 0; font-size: 19px; font-weight: 800; letter-spacing: -.01em; }
@@ -483,6 +507,22 @@
     </section>
 
     <div class="side">
+    <!-- Leaderboard: everyone's attendance from the Google Sheet (not just this device) -->
+    <section class="card glass lb-card" id="lbCard">
+      <div class="week-head">
+        <div>
+          <h2>🏆 Leaderboard</h2>
+          <div class="week-range" id="lbSub">Loading…</div>
+        </div>
+        <div class="seg" role="tablist" aria-label="Leaderboard period">
+          <button class="seg-b on" id="lbWeek" type="button" role="tab">Week</button>
+          <button class="seg-b" id="lbMonth" type="button" role="tab">Month</button>
+        </div>
+      </div>
+      <div class="podium" id="lbPodium"></div>
+      <div class="lb-list" id="lbList"></div>
+    </section>
+
     <!-- Weekly attendance (Monday to Friday, resets every Monday) -->
     <section class="card glass week-card">
       <div class="week-head">
@@ -528,9 +568,9 @@
     </div>
   </main>
 
-  <footer class="foot">Centre of AI &amp; Professional Skills Development (CAIPSD), The Islamia University of Bahawalpur<span class="app-version" id="appVersion">CAIPSD Attendance · Version 2026.10.14.2</span></footer>
+  <footer class="foot">Centre of AI &amp; Professional Skills Development (CAIPSD), The Islamia University of Bahawalpur<span class="app-version" id="appVersion">CAIPSD Attendance · Version 2026.10.14.3</span></footer>
 </div>
 
-<script src="app.js?v=2026.10.14.2"></script>
+<script src="app.js?v=2026.10.14.3"></script>
 </body>
 </html>
