@@ -1043,7 +1043,6 @@ async function flushOutbox() {
         if (payload.blindSends < 3) { try { const sealed = await seal(payload); await outboxTx('readwrite', s => s.put(sealed, k)); } catch (e) {} continue; }
       }
       await outboxTx('readwrite', s => s.delete(k));   // saved, already there, refused, or sent blind 3 times
-      if (r.result === 'saved') leaderboardSoon();
       if (r.result === 'rejected') onSheetRejected(payload, r.reason);
       refreshSyncPill();
     }
@@ -1188,66 +1187,7 @@ function backgroundScore(face) {
 }
 
 
-/* ---------- leaderboard ----------
-   Rankings come from the Google Sheet, so they include everyone's check-ins (every phone), not just this one's.
-   Ranked by days present, then by earlier average arrival. The last copy is kept on the device for offline use. */
-const LB_KEY = 'caipsd.lb';
-let lbData = null, lbPeriod = 'week', lbLoading = false, lbTimer = 0;
-try { lbData = JSON.parse(localStorage.getItem(LB_KEY) || 'null'); } catch (e) {}
-try { if (localStorage.getItem('caipsd.lbPeriod') === 'month') lbPeriod = 'month'; } catch (e) {}
-async function loadLeaderboard() {
-  if (!syncEnabled() || lbLoading || !navigator.onLine) { renderLeaderboard(); return; }
-  lbLoading = true;
-  const ac = new AbortController(), t = setTimeout(() => ac.abort(), 30000);
-  try {
-    const res = await fetch(GOOGLE_SHEET_WEB_APP_URL, { method: 'POST', headers: { 'Content-Type': 'text/plain' }, body: JSON.stringify({ action: 'leaderboard', token: SYNC_TOKEN }), referrerPolicy: 'no-referrer', credentials: 'omit', signal: ac.signal });
-    const j = JSON.parse(await res.text());
-    if (j && j.result === 'ok' && j.week && j.month) {
-      lbData = { updated: clean(j.updated, 12), week: j.week, month: j.month, fetchedAt: Date.now() };
-      try { localStorage.setItem(LB_KEY, JSON.stringify(lbData)); } catch (e) {}
-    }
-  } catch (e) { console.warn('Leaderboard not loaded', e); }
-  finally { clearTimeout(t); lbLoading = false; renderLeaderboard(); }
-}
-function leaderboardSoon() { clearTimeout(lbTimer); lbTimer = setTimeout(loadLeaderboard, 4000); }   // after a check-in reaches the Sheet
-// keep it fresh on a phone left open: every 10 minutes while on screen, and when coming back to the app
-setInterval(() => { if (!document.hidden) loadLeaderboard(); }, 10 * 60 * 1000);
-document.addEventListener('visibilitychange', () => { if (!document.hidden && lbData && Date.now() - (lbData.fetchedAt || 0) > 2 * 60 * 1000) loadLeaderboard(); });
-window.addEventListener('online', () => loadLeaderboard());
-function setLbPeriod(p) { lbPeriod = p; try { localStorage.setItem('caipsd.lbPeriod', p); } catch (e) {} renderLeaderboard(); }
-function renderLeaderboard() {
-  if (!$('lbCard')) return;
-  $('lbWeek').classList.toggle('on', lbPeriod === 'week'); $('lbMonth').classList.toggle('on', lbPeriod === 'month');
-  $('lbWeek').setAttribute('aria-selected', String(lbPeriod === 'week')); $('lbMonth').setAttribute('aria-selected', String(lbPeriod === 'month'));
-  const p = lbData && lbData[lbPeriod], podium = $('lbPodium'), list = $('lbList');
-  if (!p || !Array.isArray(p.rows)) {
-    $('lbSub').textContent = !syncEnabled() ? 'Connect the Google Sheet to see the leaderboard' : navigator.onLine ? 'Loading…' : 'Connect to the internet to see the leaderboard';
-    podium.replaceChildren(); list.replaceChildren(); return;
-  }
-  const wd = Number(p.workdays) || 0;
-  const old = Date.now() - (lbData.fetchedAt || 0) > 30 * 60 * 1000;
-  $('lbSub').textContent = `${clean(p.label, 20)} · ${wd} working day${wd === 1 ? '' : 's'} · updated ${lbData.updated}${old ? ' (offline copy)' : ''}`;
-  const key = (n) => clean(n, 60).toLowerCase();
-  const mine = new Set(enrollments.map(e => key(e.name)));
-  const rows = p.rows.slice(0, 60).map(r => ({ rank: Number(r.rank) || 0, name: clean(r.name, 60) || '?', dept: clean(r.dept, 30), days: Number(r.days) || 0,
-    pct: Number(r.pct) || 0, avg: clean(r.avg, 12), streak: Number(r.streak) || 0 }));
-  // same number of days present = same rank (1, 1, 1, 2 ...), worked out here so it never depends on the Sheet's version
-  rows.sort((a, b) => b.days - a.days);   // stable: keeps the Sheet's order (earlier arrival first) within a tie
-  rows.forEach((r, i) => { r.rank = i === 0 ? 1 : (r.days === rows[i - 1].days ? rows[i - 1].rank : rows[i - 1].rank + 1); });
-  if (!rows.length) { podium.replaceChildren(); list.replaceChildren(h('div', { class: 'empty', text: 'No check-ins yet in this period.' })); return; }
-  const you = (r) => mine.has(key(r.name)) ? h('span', { class: 'you', text: 'You' }) : null;
-  const daysTxt = (r) => `${r.days}/${wd} day${wd === 1 ? '' : 's'}`;
-  // medals follow the rank, so people tied at #1 all get gold
-  const medalOf = (rk) => rk === 1 ? '🥇' : rk === 2 ? '🥈' : rk === 3 ? '🥉' : '#' + rk;
-  const pod = (r, cls) => r ? h('div', { class: 'pod ' + cls + (mine.has(key(r.name)) ? ' me' : '') },
-    h('div', { class: 'medal', text: medalOf(r.rank) }), h('span', { class: 'pod-rk', text: '#' + r.rank }), h('div', { class: 'avatar', text: r.name.charAt(0).toUpperCase() }),
-    h('b', { text: r.name }), h('small', { text: r.dept || '—' }), h('span', { class: 'pts', text: daysTxt(r) }), you(r)) : h('div');
-  podium.replaceChildren(pod(rows[1], 'second'), pod(rows[0], 'first'), pod(rows[2], 'third'));
-  list.replaceChildren(...rows.slice(3).map(r => h('div', { class: 'lrow' + (mine.has(key(r.name)) ? ' me' : '') },
-    h('span', { class: 'rk', text: String(r.rank) }), h('span', { class: 'avatar', text: r.name.charAt(0).toUpperCase() }),
-    h('div', { class: 'wname-box' }, h('b', null, r.name, you(r)), h('small', { text: `${r.dept ? r.dept + ' · ' : ''}avg\u00a0${r.avg.replace(' ', '\u00a0')}${r.streak >= 2 ? ' · 🔥\u00a0' + r.streak : ''}` })),
-    h('div', { class: 'lr-end' }, h('b', { text: daysTxt(r) }), h('small', { text: r.pct + '%' })))));
-}
+try { localStorage.removeItem('caipsd.lb'); localStorage.removeItem('caipsd.lbPeriod'); } catch (e) {}   // old leaderboard copy, no longer used
 
 /* ---------- views ---------- */
 function setMode(m) {
@@ -1314,7 +1254,6 @@ async function init() {
   $('splash').classList.add('out'); setTimeout(() => { $('splash').remove(); app.classList.remove('enter'); }, 700);
   unlockAudio();
   outboxReady = true; flushOutbox();   // send anything saved while the device was offline
-  renderLeaderboard(); loadLeaderboard();
   // ask the browser never to clear this app's data (enrolled faces, unsent check-ins) when the phone runs low on space
   try { if (navigator.storage && navigator.storage.persist) navigator.storage.persisted().then(p => p || navigator.storage.persist()).catch(() => {}); } catch (e) {}
   setTimeout(() => later(pruneOldPhotos), 20000);   // tidy old device photos once things are quiet
@@ -1414,10 +1353,6 @@ function askPin(kind) {
 }
 
 $('tabRecognize').addEventListener('click', () => setMode('recognize'));
-$('lbWeek').addEventListener('click', () => setLbPeriod('week'));
-$('lbMonth').addEventListener('click', () => setLbPeriod('month'));
-setInterval(() => { if (!document.hidden) loadLeaderboard(); }, 5 * 60 * 1000);   // fresh rankings every 5 minutes
-window.addEventListener('online', loadLeaderboard);
 $('tabEnroll').addEventListener('click', () => { if (mode !== 'enroll') askPin('unlock').then(ok => { if (ok) { setMode('enroll'); touchEnroll(); } }); });
 $('btnChangePin').addEventListener('click', () => askPin('change'));
 $('btnFlip').addEventListener('click', flipCamera);

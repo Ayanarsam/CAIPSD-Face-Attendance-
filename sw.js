@@ -1,7 +1,7 @@
 /* CAIPSD Rollcall service worker: keeps the face models and engines on the device,
    so the app starts fast and still opens when the internet is down. */
 const CACHE = 'rollcall-assets-v1';
-const PAGE_CACHE = 'rollcall-page-v3';
+const PAGE_CACHE = 'rollcall-page-v4';
 
 // Versioned files that never change at the same URL: serve from the device first.
 const ASSET_HOSTS = ['cdn.jsdelivr.net', 'storage.googleapis.com', 'fonts.gstatic.com'];
