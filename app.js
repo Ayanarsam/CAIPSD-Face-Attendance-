@@ -34,6 +34,7 @@ const VOICE_ON = true;   // set to false to turn off the spoken "Welcome, name"
 let mode = 'recognize';                 // 'recognize' | 'enroll'
 let enrollments = [];                   // [{id, name, section, descriptor: Float32Array}]
 let records = [];
+let dataVer = 0;                        // goes up whenever records or enrollments change (lets results be reused until then)
 let deviceKey = null;
 let video, overlay, ctx;
 let pendingEnrollDescriptor = null, capturedDescriptorForSave = null;
@@ -100,13 +101,23 @@ function toB64(buf) { const b = new Uint8Array(buf); let s = ''; for (let i = 0;
 function fromB64(s) { const bin = atob(s), out = new Uint8Array(bin.length); for (let i = 0; i < bin.length; i++) out[i] = bin.charCodeAt(i); return out; }
 
 let dbP = null;
+// The connection is reopened if the browser ever closes it (low storage, data cleared, a newer tab upgrading it)
+// or if opening it once failed, so saving never stays broken for the rest of the day.
 function openDB() {
   return dbP || (dbP = new Promise((res, rej) => {
     const r = indexedDB.open('caipsd', 4);
     r.onupgradeneeded = () => { const d = r.result; for (const s of ['k', 'photos', 'outbox', 'rec']) if (!d.objectStoreNames.contains(s)) d.createObjectStore(s); };
-    r.onsuccess = () => res(r.result); r.onerror = () => rej(r.error);
+    r.onsuccess = () => {
+      const d = r.result;
+      d.onclose = () => { dbP = null; };
+      d.onversionchange = () => { try { d.close(); } catch (e) {} dbP = null; };
+      res(d);
+    };
+    r.onerror = () => { dbP = null; rej(r.error); };
   }));
 }
+// a transaction on a connection that has just been closed: forget it, so the next save opens a fresh one
+function dbGone(e) { if (e && (e.name === 'InvalidStateError' || e.name === 'UnknownError')) dbP = null; }
 // Check-in photos live in IndexedDB (big quota), each one encrypted with the device key.
 // The Google Sheet / Drive keep the real copies, so the device keeps only the last PHOTO_KEEP_DAYS days.
 const PHOTO_KEEP_DAYS = 60;
@@ -114,7 +125,7 @@ async function putPhoto(ts, dataUrl) {
   try {
     const db = await openDB(), val = await seal({ img: dataUrl });
     await new Promise((res, rej) => { const tx = db.transaction('photos', 'readwrite'); tx.objectStore('photos').put(val, ts); tx.oncomplete = res; tx.onerror = () => rej(tx.error); });
-  } catch (e) { console.warn('Photo save failed', e); }
+  } catch (e) { dbGone(e); console.warn('Photo save failed', e); }
 }
 async function clearPhotos() {
   try { const db = await openDB(); await new Promise((res, rej) => { const tx = db.transaction('photos', 'readwrite'); tx.objectStore('photos').clear(); tx.oncomplete = res; tx.onerror = () => rej(tx.error); }); } catch (e) {}
@@ -178,6 +189,7 @@ async function saveNow() {
     });
     return 'monthly';
   } catch (err) {   // no IndexedDB on this device (e.g. private window): keep everything in localStorage as before
+    dbGone(err);
     console.warn('Monthly save unavailable, saving all records in one piece', err);
     localStorage.setItem(KEY.rec, await seal(records));
     return 'single';
@@ -416,13 +428,13 @@ function engineFailed(e) {
   if (++engineFails === 40) {   // ~40 failures in a row: the engine is broken, not just one bad frame
     console.error('Face engine keeps failing, restarting', e);
     setStatus('Face engine stopped working. Restarting…', 'err', 15000);
-    reloadWhenFree();
+    reloadWhenFree(30000);   // it can't check anyone in while broken, so don't wait long for an empty camera
   }
 }
-let idCost = 120, idNextAt = 0;
+let idCost = 120, idNextAt = 0, idStartedAt = 0;
 async function runIdentity() {
   if (performance.now() < idNextAt) return;
-  idBusy = true; const t0 = performance.now();
+  idBusy = true; const t0 = performance.now(); idStartedAt = t0;
   try {
     const opts = new faceapi.TinyFaceDetectorOptions({ inputSize: idInputSize(), scoreThreshold: 0.45 });
     // Close-up first: the blink engine already knows where the face is, so recognise a crop around it.
@@ -551,9 +563,9 @@ function updateTracks(faces, t) {
       else if (tr.blinkAt && t - tr.blinkAt < BLINK_WINDOW_MS) {
         if (tr.closed && t - tr.blinkAt < PHOTO_WAIT_MS) state = 'blinked';   // wait a moment so the photo has open eyes
         else {
-          const { rec, photo } = recordAttendance(tr.name, ob);
+          const { rec } = recordAttendance(tr.name, ob);
           tr.blinkAt = 0; state = 'recorded'; label = tr.name + '  ✓';
-          showSuccess(rec, photo);
+          showSuccess(rec);
         }
       } else state = 'blink';
     }
@@ -767,7 +779,7 @@ function chime() {
     o.connect(g); g.connect(audioCtx.destination); o.start(t0 + d); o.stop(t0 + d + 0.4);
   });
 }
-function showSuccess(rec, photo) {
+function showSuccess(rec) {
   sayWelcome(rec.name.split(' ')[0]);   // first, so the voice starts together with the pop-up
   const box = $('success'), ring = $('ring');
   $('sTitle').textContent = `Thank you, ${rec.name.split(' ')[0]}!`;
@@ -823,8 +835,16 @@ function weekInfo(now = new Date()) {
   const friday = new Date(monday.getFullYear(), monday.getMonth(), monday.getDate() + 4);
   return { monday, friday, start: monday.getTime(), end: next.getTime(), todayIdx, key: monday.toDateString() + '|' + todayIdx };
 }
+let weekCache = { key: '', val: null };
 function weekStats() {
-  const w = weekInfo(), seen = new Map(), daily = [0, 0, 0, 0, 0];
+  const w = weekInfo(), ck = w.key + '|' + dataVer + '|' + records.length + '|' + enrollments.length;
+  if (weekCache.key === ck) return weekCache.val;   // nothing changed since last time: no need to go through every record again
+  const val = computeWeekStats(w);
+  weekCache = { key: ck, val };
+  return val;
+}
+function computeWeekStats(w) {
+  const seen = new Map(), daily = [0, 0, 0, 0, 0];
   for (const r of records) {
     if (r.ts < w.start || r.ts >= w.end || r.sync === 'rejected') continue;   // refused by the Sheet: not counted
     const d = new Date(r.ts), idx = (d.getDay() + 6) % 7;
@@ -930,7 +950,7 @@ async function saveEnrollmentName() {
   if (idx < 0 && enrollments.length >= MAX_ENROLLED) { setStatus('Roster is full.', 'err'); return; }
   const entry = { id: idx >= 0 ? enrollments[idx].id : crypto.randomUUID(), name, section, descriptor: capturedDescriptorForSave };
   if (idx >= 0) enrollments[idx] = entry; else enrollments.push(entry);
-  capturedDescriptorForSave = null; $('nameSection').classList.add('hidden');
+  capturedDescriptorForSave = null; $('nameSection').classList.add('hidden'); dataVer++;
   tracks.forEach(t => { t.name = null; });
   renderEnrolledList(); renderLog(); setStatus(`${name} enrolled.`, 'ok', 1500);
   enrDirty = true; await persist();
@@ -939,7 +959,7 @@ function cancelEnrollment() { capturedDescriptorForSave = null; $('nameSection')
 async function deleteEnrollment(id) {
   const e = enrollments.find(x => x.id === id); if (!e) return;
   if (!confirm(`Remove ${e.name} and their face data?`)) return;
-  enrollments = enrollments.filter(x => x.id !== id);
+  enrollments = enrollments.filter(x => x.id !== id); dataVer++;
   tracks.forEach(t => { t.name = null; });
   renderEnrolledList(); renderLog(); enrDirty = true; await persist();
 }
@@ -955,19 +975,28 @@ function renderEnrolledList() {
 
 /* ---------- records ---------- */
 let presentCache = { key: '', set: new Set() };
+let todayStr = '', todayStrAt = -1e9;
+function todayString() {
+  const n = performance.now();
+  if (n - todayStrAt > 1000) { todayStr = new Date().toLocaleDateString(); todayStrAt = n; }
+  return todayStr;
+}
 function presentToday() {
-  const today = new Date().toLocaleDateString(), key = today + '|' + records.length;
+  const today = todayString(), key = today + '|' + records.length;
   if (presentCache.key !== key) presentCache = { key, set: new Set(records.filter(r => r.date === today).map(r => r.name)) };
   return presentCache.set;
 }
-function capturePhoto() {
+// The check-in photo is copied from the camera at the moment of the blink (fast), and turned into a JPEG
+// a moment later, after the thank-you pop-up is on screen, so the pop-up and voice never wait for it.
+function grabPhoto() {
   try {
     const w = 320, ratio = (video.videoHeight / video.videoWidth) || 0.75;
     const c = document.createElement('canvas'); c.width = w; c.height = Math.round(w * ratio);
     c.getContext('2d').drawImage(video, 0, 0, c.width, c.height);
-    return c.toDataURL('image/jpeg', 0.6);
+    return c;
   } catch (e) { return null; }
 }
+function encodePhoto(c) { try { return c ? c.toDataURL('image/jpeg', 0.6) : null; } catch (e) { return null; } }
 const later = (fn) => setTimeout(() => (window.requestIdleCallback ? requestIdleCallback(fn, { timeout: 700 }) : fn()), 350);
 function isLate(d) {
   const m = /^(\d{1,2}):(\d{2})$/.exec(LATE_AFTER || ''); if (!m) return false;
@@ -975,25 +1004,30 @@ function isLate(d) {
 }
 function recordAttendance(name, face) {
   const now = new Date(), enr = enrollments.find(e => e.name === name);
-  const photo = capturePhoto();
-  const bg = backgroundScore(face);
+  const shot = grabPhoto(), bgShot = grabBackground(face);   // both pictures are taken now, from this exact frame
   const rec = { name, section: enr ? enr.section : '', date: now.toLocaleDateString(), time: now.toLocaleTimeString(), ts: now.getTime(), late: isLate(now) };
-  records.push(rec); markRecord(rec.ts); highlightTs = rec.ts; presentCache.key = '';
-  // after the thank-you animation starts, in separate small steps so the camera never stutters
-  later(() => { renderLog(); later(() => { persist(); if (photo) later(() => putPhoto(rec.ts, photo)); }); });
-  if (syncEnabled()) {
-    const payload = { ...rec, status: rec.late ? 'Late' : 'On time', token: SYNC_TOKEN }; if (photo) payload.image = photo;
-    if (bg !== null) payload.bg = bg;
-    queueSync(payload);
-  }
-  return { rec, photo };
+  records.push(rec); markRecord(rec.ts); highlightTs = rec.ts; presentCache.key = ''; dataVer++;
+  // just after the thank-you pop-up appears: finish the photo and office check, then send it to the Sheet
+  setTimeout(() => {
+    const photo = encodePhoto(shot);
+    const bg = scoreBackground(bgShot);
+    if (syncEnabled()) {
+      const payload = { ...rec, status: rec.late ? 'Late' : 'On time', token: SYNC_TOKEN }; if (photo) payload.image = photo;
+      if (bg !== null) payload.bg = bg;
+      queueSync(payload);
+    }
+    // then, in separate small steps so the camera never stutters
+    later(() => { renderLog(); later(() => { persist(); if (photo) later(() => putPhoto(rec.ts, photo)); }); });
+  }, 80);
+  return { rec };
 }
 
 /* ---------- offline sync: every check-in waits in an encrypted outbox until the Sheet receives it ---------- */
 let outboxCount = 0, flushing = false, flushAgain = false, outboxReady = false;   // ready once the device key has loaded
 function syncEnabled() { return GOOGLE_SHEET_WEB_APP_URL.startsWith('https://script.google.com/macros/s/'); }
 function outboxTx(txMode, fn) {
-  return openDB().then(db => new Promise((res, rej) => { const tx = db.transaction('outbox', txMode); const out = fn(tx.objectStore('outbox')); tx.oncomplete = () => res(out && out.result); tx.onerror = () => rej(tx.error); }));
+  return openDB().then(db => new Promise((res, rej) => { const tx = db.transaction('outbox', txMode); const out = fn(tx.objectStore('outbox')); tx.oncomplete = () => res(out && out.result); tx.onerror = () => rej(tx.error); }))
+    .catch(e => { dbGone(e); throw e; });
 }
 async function refreshSyncPill() {
   try { outboxCount = await outboxTx('readonly', s => s.count()) || 0; } catch (e) {}
@@ -1068,7 +1102,7 @@ function onSheetRejected(p, reason) {
         : /CAIPSD office/i.test(reason) ? `${first}'s check-in was not saved: please check in in front of the CAIPSD wall.`
         : `${first}'s check-in was not saved (${reason}). Ask an admin.`;
   }
-  presentCache.key = ''; streakCache.key = ''; logDirty = true;
+  presentCache.key = ''; streakCache.key = ''; logDirty = true; dataVer++;
   markRecord(p.ts); persist(); renderLog();
   statusHoldUntil = 0;
   setStatus('⚠ ' + msg, 'err', 9000);
@@ -1108,7 +1142,7 @@ function logRow(r) {
 async function clearRecords() {
   if (!(await askPin('clear'))) return;   // same passcode as enrolling
   if (!confirm('Delete ALL attendance records on this device? This cannot be undone.')) return;
-  records = []; presentCache.key = ''; streakCache.key = ''; dayCache.clear(); renderLog();
+  records = []; presentCache.key = ''; streakCache.key = ''; dayCache.clear(); dataVer++; renderLog();
   recAll = true; await Promise.all([persist(), clearPhotos()]);
   try { localStorage.removeItem(KEY.rec); } catch (e) {}
 }
@@ -1126,7 +1160,7 @@ function exportCSV() {
 const BG_MODEL = 'https://storage.googleapis.com/mediapipe-models/image_embedder/mobilenet_v3_small/float32/1/mobilenet_v3_small.tflite';
 const BG_DIR = 'assets/office-bg/';
 const BG_W = 240, BG_H = 320;   // office photos and check-ins are compared at this size (portrait selfie shape)
-let bgEmbedder = null, bgRefs = null, bgLoading = false, bgCanvas = null;
+let bgEmbedder = null, bgRefs = null, bgLoading = false;
 function bgGrey(g, x0, y0, x1, y1) { g.fillStyle = '#808080'; g.fillRect(x0, y0, x1 - x0, y1 - y0); }
 function bgVector(c) {
   const e = bgEmbedder.embed(c).embeddings[0];
@@ -1165,20 +1199,28 @@ async function loadBackgroundCheck() {
   } catch (e) { console.warn('Background check unavailable', e); bgEmbedder = null; bgRefs = null; }
   finally { bgLoading = false; }
 }
-// Score of the current camera picture; face = the person's face box in video pixels. null = can't tell.
-function backgroundScore(face) {
+// The selfie-shaped part of the current camera picture around the face, with the person greyed out
+// (face = the person's face box in video pixels). Copied at the moment of the check-in; null = can't tell.
+function grabBackground(face) {
   if (!bgRefs || !bgEmbedder || !video || !video.videoWidth || !face) return null;
   try {
     const vw = video.videoWidth, vh = video.videoHeight;
-    // the selfie-shaped part of the picture around the face (landscape cameras are cut to portrait)
+    // landscape cameras are cut to portrait
     let sw = vw, sh = vh;
     if (vw / vh > BG_W / BG_H) sw = vh * BG_W / BG_H; else sh = vw * BG_H / BG_W;
     const sx = Math.max(0, Math.min(vw - sw, face.cx - sw / 2)), sy = Math.max(0, Math.min(vh - sh, face.cy - sh * 0.4));
-    const c = bgCanvas || (bgCanvas = document.createElement('canvas')); c.width = BG_W; c.height = BG_H;
+    const c = document.createElement('canvas'); c.width = BG_W; c.height = BG_H;   // one per check-in, so two people close together never mix
     const g = c.getContext('2d', { willReadFrequently: true }), k = BG_W / sw;
     g.drawImage(video, sx, sy, sw, sh, 0, 0, BG_W, BG_H);
     // grey out the person: the face and everything below it
     bgGrey(g, (face.cx - 0.95 * face.w - sx) * k, (face.cy - 0.9 * face.h - sy) * k, (face.cx + 0.95 * face.w - sx) * k, BG_H);
+    return c;
+  } catch (e) { console.warn('Background picture failed', e); return null; }
+}
+// How much that picture looks like the CAIPSD wall (1 = same, 0 = nothing alike). null = can't tell.
+function scoreBackground(c) {
+  if (!c || !bgRefs || !bgEmbedder) return null;
+  try {
     const v = bgVector(c);
     let best = 0;
     for (const r of bgRefs) { let d = 0; for (let i = 0; i < v.length; i++) d += v[i] * r[i]; if (d > best) best = d; }
@@ -1228,12 +1270,7 @@ async function init() {
   const t0 = performance.now();
 
   // face-api.js is deferred (so the splash paints instantly); it keeps loading in the background
-  const libEl = $('faceLib');
-  const libP = new Promise((res, rej) => {
-    if (window.faceapi) return res();
-    libEl.addEventListener('load', () => res());
-    libEl.addEventListener('error', () => rej(new Error('Could not load the face library. Check your internet connection.')));
-  });
+  const libP = faceLibLoaded();
   libP.catch(() => {});   // handled below, once the app is on screen
 
   setProgress(30, 'Starting camera…');
@@ -1241,7 +1278,7 @@ async function init() {
   const dataP = loadData();
 
   // Open the app as soon as the stored data is ready; the face engine finishes loading behind it.
-  await dataP;
+  await dataP; dataVer++;
   setProgress(100, 'Ready');
   const minSplash = 450 - (performance.now() - t0);   // just long enough for the logo animation not to flicker
   if (minSplash > 0) await timeout(minSplash);
@@ -1261,25 +1298,76 @@ async function init() {
   if (!camError) setStatus('Starting face engine…', 'wait');
 
   // ---- face engine (background) ----
-  await libP;
-  try { await faceapi.tf.setBackend('webgl'); await faceapi.tf.ready(); } catch (e) { console.warn('WebGL unavailable', e); }
-  // Small models first (they're needed to see a face); the big recognition model is downloaded meanwhile
-  // but only set up afterwards, so the two don't fight over the graphics chip.
-  const recogFile = faceapi.nets.faceRecognitionNet.loadFromUri(MODEL_URL);
-  recogFile.catch(() => {});
-  await Promise.all([
-    faceapi.nets.tinyFaceDetector.loadFromUri(MODEL_URL),
-    faceapi.nets.faceLandmark68Net.loadFromUri(MODEL_URL)
-  ]);
+  // If the internet drops while it loads, it tries again by itself (instead of staying broken until someone reloads).
+  let recogFile = null, backendSet = false;
+  for (let attempt = 1; ; attempt++) {
+    try {
+      await (attempt === 1 ? libP : faceLibLoaded());
+      if (!backendSet) { backendSet = true; try { await faceapi.tf.setBackend('webgl'); await faceapi.tf.ready(); } catch (e) { console.warn('WebGL unavailable', e); } }
+      // Small models first (they're needed to see a face); the big recognition model is downloaded meanwhile
+      // but only set up afterwards, so the two don't fight over the graphics chip.
+      if (!recogFile) { recogFile = faceapi.nets.faceRecognitionNet.loadFromUri(MODEL_URL); recogFile.catch(() => {}); }
+      await Promise.all([
+        faceapi.nets.tinyFaceDetector.isLoaded || faceapi.nets.tinyFaceDetector.loadFromUri(MODEL_URL),
+        faceapi.nets.faceLandmark68Net.isLoaded || faceapi.nets.faceLandmark68Net.loadFromUri(MODEL_URL)
+      ]);
+      break;
+    } catch (err) {
+      console.warn(`Face engine did not load (try ${attempt})`, err);
+      statusHoldUntil = 0;
+      setStatus(navigator.onLine ? 'Face engine could not load. Trying again…' : 'No internet: the face engine will load as soon as it is back.', 'err', 600000);
+      await retryPause(attempt);
+    }
+  }
   await Promise.race([warmDetector(), timeout(1500)]);
   engineReady = true;
+  statusHoldUntil = 0;
   if (!tracks.length && !camError) setStatus('Look at the camera and blink once.', 'wait');
+  else if (camError) setStatus(camError + ' Retrying…', 'err', 600000);
   faLoop();
-  recogFile
-    .then(warmIdentity)   // prepares the exact recognition steps used at check-in, so the first person never hits a freeze
-    .then(() => { recogReady = true; tracks.forEach(t => { t.name = null; }); setTimeout(() => later(loadBackgroundCheck), 4000); })
-    .catch(err => { console.error('Recognition model failed', err); recogFailed = true; });
+  loadRecognition(recogFile);
   perfFrom = performance.now() + 6000;   // ignore start-up warm-up when judging speed
+}
+
+// The big recognition model: set up after the small ones; downloaded again if that failed.
+async function loadRecognition(firstTry) {
+  for (let attempt = 1; ; attempt++) {
+    try {
+      await (attempt === 1 && firstTry ? firstTry : faceapi.nets.faceRecognitionNet.isLoaded || faceapi.nets.faceRecognitionNet.loadFromUri(MODEL_URL));
+      await warmIdentity();   // prepares the exact recognition steps used at check-in, so the first person never hits a freeze
+      recogFailed = false; recogReady = true; tracks.forEach(t => { t.name = null; });
+      setTimeout(() => later(loadBackgroundCheck), 4000);
+      return;
+    } catch (err) {
+      console.error(`Recognition model did not load (try ${attempt})`, err);
+      recogFailed = true;
+      await retryPause(attempt);
+    }
+  }
+}
+// wait before trying again: until the internet is back, then 5 s, 10 s, 20 s … at most a minute
+async function retryPause(attempt) {
+  if (!navigator.onLine) await new Promise(res => window.addEventListener('online', res, { once: true }));
+  await timeout(Math.min(60000, 5000 * 2 ** Math.min(attempt - 1, 4)));
+}
+// face-api.js: the page's own script tag the first time; a fresh tag if that download failed
+// (a failed script tag never loads again by itself).
+let libTag = null;
+function faceLibLoaded() {
+  if (window.faceapi) return Promise.resolve();
+  return new Promise((res, rej) => {
+    const first = $('faceLib');
+    let el = first;
+    if (libTag === 'failed') {
+      el = document.createElement('script');
+      el.src = first.src; el.integrity = first.integrity; el.crossOrigin = 'anonymous';
+      first.removeAttribute('id'); el.id = 'faceLib';
+      document.head.appendChild(el);
+    }
+    libTag = 'loading';
+    el.addEventListener('load', () => { libTag = 'ok'; if (window.faceapi) res(); else { libTag = 'failed'; rej(new Error('The face library did not start.')); } }, { once: true });
+    el.addEventListener('error', () => { libTag = 'failed'; rej(new Error('Could not load the face library. Check your internet connection.')); }, { once: true });
+  });
 }
 
 /* ---------- enrollment passcode ----------
@@ -1422,12 +1510,48 @@ setInterval(() => {
   // seen stopped twice in a row (a phone that only froze for a moment has caught up by the second look)
   if (!loopSuspect) { loopSuspect = true; return; }
   loopSuspect = false; loopBeat = performance.now();
-  let last = 0; try { last = Number(sessionStorage.getItem('watchdogAt')) || 0; } catch (e) {}
-  if (Date.now() - last < 10 * 60 * 1000) return;   // at most one watchdog reload every 10 minutes
-  try { sessionStorage.setItem('watchdogAt', String(Date.now())); } catch (e) {}
+  if (!watchdogAllowed()) return;   // at most one watchdog reload every 10 minutes
   console.error('Face engine loop stopped, reloading');
   reloadWhenFree();
 }, 5000);
+
+// Recognition stuck: one recognition step has not finished for 20 s (a hung graphics driver). Faces would still be
+// tracked but never named, so reload, even if someone is waiting at the camera (after at most 30 s more).
+setInterval(() => {
+  if (!idBusy || document.hidden || performance.now() - idStartedAt < 20000) return;
+  if (!watchdogAllowed()) return;
+  console.error('Face recognition is stuck, reloading');
+  setStatus('Face recognition stopped responding. Restarting…', 'err', 15000);
+  reloadWhenFree(30000);
+}, 5000);
+
+// Long days: the office device stays open for days. Every minute, check that the graphics memory used by the face
+// engine is not slowly piling up, and after 12 hours give the app a fresh start when nobody has been at the camera
+// for 10 minutes (only when online, so the fresh start can load everything).
+const BOOT_AT = Date.now();
+let tensorBase = 0;
+setInterval(() => {
+  if (reloading || mode === 'enroll' || document.hidden) return;
+  if (recogReady && window.faceapi) {
+    try {
+      const n = faceapi.tf.memory().numTensors;
+      if (!tensorBase) tensorBase = n;
+      else if (n > tensorBase + 1500 && watchdogAllowed()) { console.warn(`Face engine memory grew (${tensorBase} → ${n} tensors), refreshing`); reloadWhenFree(); return; }
+    } catch (e) {}
+  }
+  const quietFor = performance.now() - (Number.isFinite(lastFaceAt) ? lastFaceAt : 0);
+  if (Date.now() - BOOT_AT > 12 * 3600e3 && navigator.onLine && quietFor > 10 * 60e3 && !tracks.length) {
+    console.info('Running for 12 hours: fresh start while nobody is at the camera');
+    reloadWhenFree();
+  }
+}, 60000);
+// at most one automatic recovery reload every 10 minutes (so a device that keeps failing never reload-loops)
+function watchdogAllowed() {
+  let last = 0; try { last = Number(sessionStorage.getItem('watchdogAt')) || 0; } catch (e) {}
+  if (Date.now() - last < 10 * 60 * 1000) return false;
+  try { sessionStorage.setItem('watchdogAt', String(Date.now())); } catch (e) {}
+  return true;
+}
 window.addEventListener('unhandledrejection', (e) => console.warn('Unhandled', e.reason));
 
 // keep models and engines on this device after the first visit (faster start, opens offline)
@@ -1448,14 +1572,20 @@ if ('serviceWorker' in navigator && location.protocol === 'https:') {
     window.addEventListener('online', checkForUpdate);
   }).catch(e => console.warn('Offline cache unavailable', e)));
 }
-// reload only when nobody is checking in, enrolling or typing (and the newest check-in has been saved)
-let reloading = false;
-function reloadWhenFree() {
+// reload only when nobody is checking in, enrolling or typing (and the newest check-in has been saved).
+// maxWaitMs: for a broken engine, don't wait for an empty camera longer than this (it can't check anyone in anyway).
+let reloading = false, reloadTimer = 0, reloadSince = 0, reloadMaxWait = Infinity;
+function reloadWhenFree(maxWaitMs) {
   if (reloading) return;
+  if (!reloadSince) reloadSince = performance.now();
+  if (maxWaitMs) reloadMaxWait = Math.min(reloadMaxWait, maxWaitMs);
+  clearTimeout(reloadTimer);   // only one waiting check at a time
   const typing = document.activeElement && /^(INPUT|TEXTAREA)$/.test(document.activeElement.tagName);
-  if (hadFaceRecently() || mode === 'enroll' || typing) { setTimeout(reloadWhenFree, 5000); return; }
+  const overdue = performance.now() - reloadSince > reloadMaxWait;
+  if (mode === 'enroll' || typing || (hadFaceRecently() && !overdue)) { reloadTimer = setTimeout(reloadWhenFree, 5000); return; }
   reloading = true;
-  saveQueue.then(() => location.reload());
+  // wait for saves to finish, plus a moment for the newest check-in to reach the on-device outbox
+  saveQueue.then(() => timeout(400)).then(() => location.reload());
 }
 function hadFaceRecently() { return (typeof lastFaceAt === 'number' && performance.now() - lastFaceAt < 8000) || tracks.length > 0; }
 
