@@ -20,7 +20,12 @@ const KEY = { enr: 'caipsd2_enr', rec: 'caipsd2_rec', oldEnr: 'eyeAttendance_enr
 const FAST_INPUT_SIZE = 160;         // face box + eyes, every frame (fallback engine)
 const ID_INPUT_SIZE = 224;           // identity pass
 const ID_RETRY_MS = 200;             // retry this fast while a face is still unidentified
-const ID_REVERIFY_MS = 8000;         // re-check an identified face this often while it stays in view
+const ID_REVERIFY_MS = 1500;         // re-check a recognised face this often while it stays in view (someone else may have stepped in)
+const ID_FRESH_MS = 250;             // a blink only checks someone in if their face was recognised from a picture taken at the blink
+                                     // (or at most this long before it), so a person who just stepped in can't be checked in under the previous name
+const TRACK_GAP_FRAMES = 3;          // a face missing from this many camera frames in a row (and for at least
+const TRACK_GAP_MS = 400;            // this long) may be a different person when one reappears; frames, not just time, so a slow phone isn't fooled
+const EYES_SHUT_WAIT_MS = 700;       // recognition waits (at most this long) for closed eyes to open: a closed-eye picture is often not recognised
 const TRACK_MATCH_RATIO = 0.6;       // how far (in face widths) a face may move between frames
 const TRACK_TTL_MS = 700;
 const MATCH_DISTANCE_THRESHOLD = 0.45;
@@ -418,9 +423,23 @@ function mpStep() {
 }
 
 function idInputSize() { return ID_INPUT_SIZE; }   // keep one size: changing it makes the GPU recompile (stutter)
+// a named face blinked, but its name was last confirmed too long ago: check who it is before checking anyone in
+function needsConfirm(tr, t) {
+  return !!(tr.name && tr.name !== 'Unknown' && blinkLive(tr, t) && !(tr.confirmedAt > tr.blinkAt - ID_FRESH_MS));
+}
+// a blink still counts for BLINK_WINDOW_MS, or until the check of who blinked comes back (slow phones take longer; at most 15 s)
+function blinkLive(tr, t) { return !!tr.blinkAt && (t - tr.blinkAt < BLINK_WINDOW_MS || t < tr.confirmUntil); }
+// 2 = urgent (not identified yet, or a blink waiting for confirmation), 1 = due for a re-check, 0 = not due
+function idPriority(tr, t) {
+  if (t - tr.lastSeen >= 300) return 0;
+  if (tr.closed && t - tr.closedAt < EYES_SHUT_WAIT_MS) return 0;   // mid-blink: wait until the eyes are open again
+  if (tr.name === null || needsConfirm(tr, t)) return 2;
+  if (tr.name === 'Unknown') return t - tr.lastIdAt > (tr.unknownHits >= 3 ? 1200 : ID_RETRY_MS) ? 1 : 0;
+  return t - tr.lastIdAt > ID_REVERIFY_MS ? 1 : 0;
+}
 function needsIdentity(t) {
   if (mode === 'enroll') return tracks.length > 0 && t - lastEnrollIdAt > 250;
-  return tracks.some(tr => t - tr.lastSeen < 300 && (tr.name === null || (tr.name === 'Unknown' && t - tr.lastIdAt > (tr.unknownHits >= 3 ? 1200 : ID_RETRY_MS)) || t - tr.lastIdAt > ID_REVERIFY_MS));
+  return tracks.some(tr => idPriority(tr, t) > 0);
 }
 let engineFails = 0;
 function engineOk() { engineFails = 0; }
@@ -433,26 +452,30 @@ function engineFailed(e) {
 }
 let idCost = 120, idNextAt = 0, idStartedAt = 0;
 async function runIdentity() {
-  if (performance.now() < idNextAt) return;
+  // a blink waiting for confirmation skips the usual pause between passes, so check-in isn't slowed down
+  if (performance.now() < idNextAt && !tracks.some(tr => needsConfirm(tr, performance.now()))) return;
   idBusy = true; const t0 = performance.now(); idStartedAt = t0;
   try {
     const opts = new faceapi.TinyFaceDetectorOptions({ inputSize: idInputSize(), scoreThreshold: 0.45 });
     // Close-up first: the blink engine already knows where the face is, so recognise a crop around it.
     // The face then fills the picture: found reliably from further away, and the result matches enrollments.
     let done = false;
-    const tr = pickIdentityTrack(performance.now());
+    // Each result is applied only if that face is still the same person it was when the picture was taken
+    // (gen changes when a face vanishes and someone reappears), and it counts from the moment of the picture.
+    const tr = pickIdentityTrack(performance.now()), gen = tr ? tr.gen : -1, shotAt = performance.now();
     if (tr && cropFace(tr)) {
       const cd = await faceapi.detectAllFaces(idCanvas, opts).withFaceLandmarks().withFaceDescriptors();
       if (cd.length) {
         let big = cd[0]; for (const d of cd) if (d.detection.box.width > big.detection.box.width) big = d;
         if (mode === 'enroll') { lastEnrollIdAt = performance.now(); pendingEnrollDescriptor = big.descriptor; }
-        identifyTrack(tr, big.descriptor, performance.now());
+        if (tr.gen === gen) identifyTrack(tr, big.descriptor, shotAt);
         done = true;
       }
     }
     if (!done) {   // no close-up result: fall back to the whole picture, as before
+      const gens = new Map(tracks.map(c => [c, c.gen])), fullAt = performance.now();
       const dets = await faceapi.detectAllFaces(video, opts).withFaceLandmarks().withFaceDescriptors();
-      applyIdentity(dets, performance.now());
+      applyIdentity(dets, fullAt, gens);
     }
     engineOk();
   } catch (e) { console.warn('Identity pass failed', e); engineFailed(e); }
@@ -462,12 +485,12 @@ async function runIdentity() {
 }
 // the face that most needs identifying (unknown first, then the biggest)
 function pickIdentityTrack(t) {
-  let best = null;
+  let best = null, bestP = 0;
   for (const tr of tracks) {
     if (!tr.target || t - tr.lastSeen > 300) continue;
-    const due = mode === 'enroll' || tr.name === null || (tr.name === 'Unknown' && t - tr.lastIdAt > (tr.unknownHits >= 3 ? 1200 : ID_RETRY_MS)) || t - tr.lastIdAt > ID_REVERIFY_MS;
-    if (!due) continue;
-    if (!best || (best.name !== null && tr.name === null) || ((best.name === null) === (tr.name === null) && tr.target.w > best.target.w)) best = tr;
+    const p = mode === 'enroll' ? 2 : idPriority(tr, t);
+    if (!p) continue;
+    if (!best || p > bestP || (p === bestP && tr.target.w > best.target.w)) { best = tr; bestP = p; }
   }
   return best;
 }
@@ -493,12 +516,14 @@ function identifyTrack(tr, descriptor, t) {
   }
   const marginOk = (second - bestDist) >= MATCH_MARGIN || enrollments.length === 1;
   if (bestDist > MATCH_DISTANCE_THRESHOLD || !marginOk) cand = 'Unknown';
-  // an identified face keeps its name through one bad re-check
-  if (cand === 'Unknown' && tr.name && tr.name !== 'Unknown' && tr.unknownHits < 1) { tr.unknownHits++; tr.lastIdAt = t; return; }
+  // an identified face keeps its name on screen through one bad re-check, but that never counts as confirming it
+  if (cand === 'Unknown' && tr.name && tr.name !== 'Unknown' && tr.unknownHits < 1) { tr.unknownHits++; tr.lastIdAt = t; tr.confirmedAt = 0; return; }
   tr.unknownHits = cand === 'Unknown' ? tr.unknownHits + 1 : 0;
   tr.name = cand; tr.lastIdAt = t;
+  tr.confirmedAt = cand === 'Unknown' ? 0 : t;   // when this face was last positively matched to this name
+  if (cand === 'Unknown') { tr.blinkAt = 0; tr.confirmUntil = 0; }   // whoever blinked is not enrolled: that blink checks no one in
 }
-function applyIdentity(dets, t) {
+function applyIdentity(dets, t, gens) {
   if (mode === 'enroll') {
     lastEnrollIdAt = t;
     let big = null; for (const d of dets) if (!big || d.detection.box.width > big.detection.box.width) big = d;
@@ -511,11 +536,18 @@ function applyIdentity(dets, t) {
     for (const c of tracks) { if (used.has(c)) continue; const d = Math.hypot(c.bx - bx, c.by - by); if (d < best) { best = d; tr = c; } }
     if (!tr) continue;
     used.add(tr);
+    if (gens && gens.get(tr) !== tr.gen) continue;   // that face changed (or is new) since the picture was taken
+    if (tr.closed && t - tr.closedAt < EYES_SHUT_WAIT_MS) continue;   // eyes were shut in that picture: don't judge by it
     identifyTrack(tr, det.descriptor, t);
   }
 }
 
 /* Shared: follow faces across frames, read both eyes, latch blinks, decide what to show. */
+function resetIdentity(tr) {
+  tr.gen++;   // any recognition still running for the previous person is ignored when it finishes
+  tr.name = null; tr.unknownHits = 0; tr.lastIdAt = 0; tr.confirmedAt = 0;
+  tr.blinkAt = 0; tr.confirmUntil = 0; tr.seenOpen = false; tr.closed = false; tr.base = 0;
+}
 function updateTracks(faces, t) {
   const used = new Set();
   let primary = null;
@@ -523,8 +555,12 @@ function updateTracks(faces, t) {
     const ob = f.ob, bx = ob.cx, by = ob.cy;
     let tr = null, best = Math.max(60, ob.w * TRACK_MATCH_RATIO);
     for (const c of tracks) { if (used.has(c)) continue; const d = Math.hypot(c.bx - bx, c.by - by); if (d < best) { best = d; tr = c; } }
-    if (!tr && faces.length === 1 && tracks.length === 1 && !used.has(tracks[0])) tr = tracks[0];   // one person: never lose them on a fast move
-    if (!tr) { tr = { id: ++trackSeq, name: null, unknownHits: 0, lastIdAt: 0, seenOpen: false, closed: false, blinkAt: 0, flashAt: -1e9, base: 0, alpha: 0.35, disp: null, vx: 0, vy: 0, tT: 0 }; tracks.push(tr); }
+    let jumped = false;
+    if (!tr && faces.length === 1 && tracks.length === 1 && !used.has(tracks[0])) { tr = tracks[0]; jumped = true; }   // one person: keep the box on a fast move
+    if (!tr) { tr = { id: ++trackSeq, gen: 0, name: null, unknownHits: 0, lastIdAt: 0, confirmedAt: 0, confirmUntil: 0, seenOpen: false, closed: false, closedAt: 0, blinkAt: 0, flashAt: -1e9, base: 0, alpha: 0.35, disp: null, vx: 0, vy: 0, tT: 0, w: ob.w, missed: 0 }; tracks.push(tr); }
+    else if (tr.missed >= TRACK_GAP_FRAMES && t - tr.lastSeen > TRACK_GAP_MS) resetIdentity(tr);   // the face was gone for a moment: whoever is there now must be recognised again
+    else if (jumped || Math.abs(ob.w - tr.w) > tr.w * 0.5) resetIdentity(tr);   // the face jumped across the picture or changed size at once: likely someone else
+    tr.w = ob.w; tr.missed = 0;
     if (tr.tT && t - tr.tT > 0 && t - tr.tT < 200) {   // movement speed, used to keep the boxes ahead of the video
       const dt = t - tr.tT; tr.vx = tr.vx * 0.35 + ((bx - tr.bx) / dt) * 0.65; tr.vy = tr.vy * 0.35 + ((by - tr.by) / dt) * 0.65;
     } else { tr.vx = 0; tr.vy = 0; }
@@ -548,8 +584,8 @@ function updateTracks(faces, t) {
     const blink = (sL + sR) / 2;
     if (blink < openT) tr.seenOpen = true;
     if (!tr.closed && blink > closeT) {
-      tr.closed = true;
-      if (tr.seenOpen) { tr.blinkAt = t; tr.flashAt = t; }   // counted the moment the eyes close
+      tr.closed = true; tr.closedAt = t;
+      if (tr.seenOpen) { tr.blinkAt = t; tr.flashAt = t; tr.confirmUntil = 0; }   // counted the moment the eyes close
     } else if (tr.closed && blink < openT) tr.closed = false;
 
     // what this face should show
@@ -560,12 +596,15 @@ function updateTracks(faces, t) {
     else if (tr.name && tr.name !== 'Unknown') {
       tone = 'ok'; label = tr.name;
       if (presentToday().has(tr.name)) { state = 'done'; label = tr.name + '  ✓'; }
-      else if (tr.blinkAt && t - tr.blinkAt < BLINK_WINDOW_MS) {
+      else if (blinkLive(tr, t)) {
         if (tr.closed && t - tr.blinkAt < PHOTO_WAIT_MS) state = 'blinked';   // wait a moment so the photo has open eyes
-        else {
+        else if (needsConfirm(tr, t)) {   // make sure it's still the same person first
+          if (!tr.confirmUntil) tr.confirmUntil = t + 15000;
+          state = 'confirming'; tone = 'scan'; label = 'Checking…';
+        } else {
           const { rec } = recordAttendance(tr.name, ob);
-          tr.blinkAt = 0; state = 'recorded'; label = tr.name + '  ✓';
-          showSuccess(rec);
+          tr.blinkAt = 0; tr.confirmUntil = 0; state = 'recorded'; label = tr.name + '  ✓';
+          showSuccess(rec, tr);
         }
       } else state = 'blink';
     }
@@ -574,6 +613,7 @@ function updateTracks(faces, t) {
     tr.state = state;
     if (!primary || ob.w > primary.w) primary = { w: ob.w, tr };
   }
+  for (const c of tracks) if (!used.has(c)) c.missed++;   // camera frames in a row in which this face was not seen
   tracks = tracks.filter(c => t - c.lastSeen < TRACK_TTL_MS);
 
   if (!primary) {
@@ -583,7 +623,9 @@ function updateTracks(faces, t) {
     setStatus(mode === 'enroll' ? 'Show your face to the camera.' : 'Look at the camera and blink once.', 'wait');
     return;
   }
-  const p = primary.tr, blinked = p.blinkAt && t - p.blinkAt < BLINK_WINDOW_MS ? 'done' : 'on';
+  const p = primary.tr, blinked = blinkLive(p, t) ? 'done' : 'on';
+  // someone else is in front of the camera now: close the previous person's thank-you straight away
+  if (successFor && (p !== successFor.tr || p.gen !== successFor.gen)) hideSuccess();
   setFrameState({ done: 'ok', recorded: 'ok', blinked: 'ok', enroll: 'ok', unknown: 'err' }[p.state] || 'scan', true);
   switch (p.state) {
     case 'loading': setSteps('done', 'on', blinked); setStatus(recogFailed ? 'Recognition model failed to load. Reload the page.' : 'Loading face recognition…', recogFailed ? 'err' : 'wait'); break;
@@ -592,6 +634,7 @@ function updateTracks(faces, t) {
     case 'unknown': setSteps('done', 'on', ''); setStatus('Face not recognised. Ask an admin to enroll you.', 'err'); break;
     case 'blink': setSteps('done', 'done', 'on'); setStatus(`${p.name}, blink once to confirm.`, 'wait'); break;
     case 'blinked': setSteps('done', 'done', 'done'); setStatus(`Blink received, ${p.name}…`, 'ok'); break;
+    case 'confirming': setSteps('done', 'on', 'done'); setStatus('Blink received. Checking who it is…', 'wait'); break;
     case 'recorded': setSteps('done', 'done', 'done'); setStatus(`✓ Attendance recorded for ${p.name}`, 'ok', SUCCESS_HOLD_MS); break;
     case 'done': setSteps('done', 'done', 'done'); setStatus(`✓ ${p.name} is already marked present`, 'ok'); break;
   }
@@ -779,7 +822,13 @@ function chime() {
     o.connect(g); g.connect(audioCtx.destination); o.start(t0 + d); o.stop(t0 + d + 0.4);
   });
 }
-function showSuccess(rec) {
+let successFor = null;   // the face the thank-you pop-up is showing for
+function hideSuccess() {
+  clearTimeout(successTimer); successFor = null;
+  $('success').classList.remove('show'); $('ring').classList.remove('flash', 'success-on');
+  statusHoldUntil = 0;   // let the status bar talk to the new person
+}
+function showSuccess(rec, tr) {
   sayWelcome(rec.name.split(' ')[0]);   // first, so the voice starts together with the pop-up
   const box = $('success'), ring = $('ring');
   $('sTitle').textContent = `Thank you, ${rec.name.split(' ')[0]}!`;
@@ -792,7 +841,8 @@ function showSuccess(rec) {
   box.classList.remove('show'); void box.offsetWidth; box.classList.add('show');
   ring.classList.add('flash', 'success-on');
   clearTimeout(successTimer);
-  successTimer = setTimeout(() => { box.classList.remove('show'); ring.classList.remove('flash', 'success-on'); }, SUCCESS_HOLD_MS);
+  successFor = tr ? { tr, gen: tr.gen } : null;
+  successTimer = setTimeout(() => { successFor = null; box.classList.remove('show'); ring.classList.remove('flash', 'success-on'); }, SUCCESS_HOLD_MS);
   if (navigator.vibrate) navigator.vibrate([60, 40, 90]);
   chime();
 }
