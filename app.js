@@ -407,14 +407,15 @@ async function faLoop() {
   if (engine !== 'faceapi') return;
   loopBeat = performance.now();
   try { await faFrame(); engineOk(); } catch (e) { console.warn(e); engineFailed(e); }
-  setTimeout(faLoop, hadFace ? (isLite() ? 30 : 0) : 150);
+  // until recognition is ready nobody can be checked in, so track gently and leave the graphics chip to the warm-up
+  setTimeout(faLoop, !recogReady ? 250 : hadFace ? (isLite() ? 30 : 0) : 150);
 }
 async function faFrame() {
   if (document.hidden || !video || video.readyState < 2 || !video.videoWidth) { hadFace = false; return; }
   // track faces every frame (recognition runs afterwards on a close-up, see runIdentity).
   // Nobody found lately: every 4th frame take a wider look (320 px) so people standing further back are found;
   // once someone is found that way, keep the wide look while they stay, and go back to the fast size when they leave.
-  const wide = faWide || (!hadFace && ++faScan % 4 === 0);
+  const wide = recogReady && (faWide || (!hadFace && ++faScan % 4 === 0));
   const dets = await faceapi.detectAllFaces(video, new faceapi.TinyFaceDetectorOptions({ inputSize: wide ? 320 : FAST_INPUT_SIZE, scoreThreshold: 0.5 })).withFaceLandmarks();
   if (engine !== 'faceapi') return;
   const now = performance.now();
@@ -441,7 +442,7 @@ function mpLoop() {
   detCost = detCost * 0.9 + cost * 0.1;
   // about 30 detections a second, leaving gaps so the overlay can be drawn smoothly in between
   const idle = !hadFace && performance.now() - lastFaceAt > 1500;   // nobody there: check ~6 times a second instead of 30
-  setTimeout(mpLoop, document.hidden ? 250 : idle ? 160 : Math.max(4, (isLite() ? 45 : 33) - cost));
+  setTimeout(mpLoop, document.hidden ? 250 : idle ? 160 : Math.max(recogReady ? 4 : 50, (isLite() ? 45 : 33) - cost));
 }
 function mpStep() {
   if (document.hidden || !video || video.readyState < 2 || !video.videoWidth || video.currentTime === lastVideoTime) return;
@@ -1308,20 +1309,30 @@ function setMode(m) {
 
 /* ---------- warm-up: compile GPU shaders before the first real face ---------- */
 function blankCanvas(size) { const c = document.createElement('canvas'); c.width = c.height = size; const g = c.getContext('2d'); g.fillStyle = '#808080'; g.fillRect(0, 0, size, size); return c; }
+// warm with a picture the same size as the camera's, so the first real camera picture doesn't stall on a compile
+function cameraSizedCanvas() {
+  const c = document.createElement('canvas'); c.width = (video && video.videoWidth) || 640; c.height = (video && video.videoHeight) || 480;
+  const g = c.getContext('2d'); g.fillStyle = '#808080'; g.fillRect(0, 0, c.width, c.height); return c;
+}
 async function warmDetector() {
   try {
-    await faceapi.detectAllFaces(blankCanvas(FAST_INPUT_SIZE), new faceapi.TinyFaceDetectorOptions({ inputSize: FAST_INPUT_SIZE, scoreThreshold: 0.5 }));
+    await faceapi.detectAllFaces(cameraSizedCanvas(), new faceapi.TinyFaceDetectorOptions({ inputSize: FAST_INPUT_SIZE, scoreThreshold: 0.5 }));
     await faceapi.detectFaceLandmarks(blankCanvas(112));
   } catch (e) {}
 }
 async function warmIdentity() {
   await timeout(50);
-  if (engine === 'faceapi') { try { await faceapi.detectAllFaces(blankCanvas(320), new faceapi.TinyFaceDetectorOptions({ inputSize: 320, scoreThreshold: 0.5 })); } catch (e) {} await timeout(30); }
   try { await faceapi.detectAllFaces(blankCanvas(ID_INPUT_SIZE), new faceapi.TinyFaceDetectorOptions({ inputSize: ID_INPUT_SIZE, scoreThreshold: 0.45 })); } catch (e) {}
   await timeout(30);
   try { await faceapi.detectFaceLandmarks(blankCanvas(112)); } catch (e) {}
   await timeout(30);
   await warmDescriptor();
+}
+// the wide look (320 px) used by the fallback tracker: warmed after check-ins already work, when nobody is at the camera
+async function warmWide() {
+  if (engine !== 'faceapi') return;
+  if (hadFaceRecently()) { setTimeout(warmWide, 3000); return; }
+  try { await faceapi.detectAllFaces(blankCanvas(320), new faceapi.TinyFaceDetectorOptions({ inputSize: 320, scoreThreshold: 0.5 })); } catch (e) {}
 }
 async function warmDescriptor() { try { await faceapi.computeFaceDescriptor(blankCanvas(150)); } catch (e) {} }
 const timeout = (ms) => new Promise(res => setTimeout(res, ms));
@@ -1417,6 +1428,7 @@ async function loadRecognition(firstTry) {
       await (attempt === 1 && firstTry ? firstTry : faceapi.nets.faceRecognitionNet.isLoaded || faceapi.nets.faceRecognitionNet.loadFromUri(MODEL_URL));
       await warmIdentity();   // prepares the exact recognition steps used at check-in, so the first person never hits a freeze
       recogFailed = false; recogReady = true; tracks.forEach(t => { t.name = null; });
+      setTimeout(warmWide, 1500);
       setTimeout(() => later(loadBackgroundCheck), 4000);
       return;
     } catch (err) {
