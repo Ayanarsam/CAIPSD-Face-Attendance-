@@ -11,7 +11,7 @@ if (window.top !== window.self) { document.documentElement.replaceChildren(); th
    face data, records and check-in photos encrypted on-device with a non-extractable key (no passphrase needed). */
 const CONFIG = (() => { try { return JSON.parse(document.getElementById('config').textContent); } catch (e) { return {}; } })();
 const GOOGLE_SHEET_WEB_APP_URL = typeof CONFIG.sheetUrl === 'string' ? CONFIG.sheetUrl : '';
-const SYNC_TOKEN = typeof CONFIG.token === 'string' ? CONFIG.token : '';
+// The Sheet key is not in the page (the code is public on GitHub). It is entered once on the device and kept there, encrypted.
 const MAX_ENROLLED = 2000;
 const MODEL_URL = "https://cdn.jsdelivr.net/npm/@vladmandic/face-api@1.7.13/model";
 const KEY = { enr: 'caipsd2_enr', rec: 'caipsd2_rec', oldEnr: 'eyeAttendance_enrollments', oldRec: 'eyeAttendance_records' };
@@ -1059,7 +1059,7 @@ function recordAttendance(name, face) {
     const photo = encodePhoto(shot);
     const bg = scoreBackground(bgShot);
     if (syncEnabled()) {
-      const payload = { ...rec, status: rec.late ? 'Late' : 'On time', token: SYNC_TOKEN }; if (photo) payload.image = photo;
+      const payload = { ...rec, status: rec.late ? 'Late' : 'On time' }; if (photo) payload.image = photo;   // the key is added when sending
       if (bg !== null) payload.bg = bg;
       queueSync(payload);
     }
@@ -1067,6 +1067,68 @@ function recordAttendance(name, face) {
     later(() => { renderLog(); later(() => { persist(); if (photo) later(() => putPhoto(rec.ts, photo)); }); });
   }, 80);
   return { rec };
+}
+
+/* ---------- Google Sheet key ----------
+   The key that lets this device write to the Sheet used to sit in the page, and the page is public on GitHub, so anyone
+   could read it and post check-ins from anywhere. Now an admin enters it once on the Enroll screen; it is kept only on
+   this device, encrypted with the device key. Without a (working) key, check-ins wait on the device and nothing is lost. */
+const SYNC_KEY_ITEM = 'caipsd_sync_key';
+const KEY_ABC = 'ABCDEFGHJKMNPQRSTUVWXYZ23456789';   // no 0/O, 1/I/L: easy to read and type
+let syncKey = '', keyRejected = false;
+async function loadSyncKey() {
+  try { const v = await unseal(localStorage.getItem(SYNC_KEY_ITEM)); syncKey = typeof v === 'string' ? v : ''; }
+  catch (e) { syncKey = ''; console.warn('Saved Sheet key unreadable', e); }
+}
+async function saveSyncKey(k) { localStorage.setItem(SYNC_KEY_ITEM, await seal(k)); syncKey = k; keyRejected = false; }
+// A key in the XXXX-XXXX-XXXX-XXXX-XXXX style can be typed in any case, with or without dashes or spaces.
+// Any other key is used exactly as typed (only spaces removed).
+function normKey(s) {
+  s = String(s || '').trim();
+  const bare = s.toUpperCase().replace(/[^A-Z0-9]/g, '');
+  if (bare.length === 20 && [...bare].every(c => KEY_ABC.includes(c))) return bare.match(/.{4}/g).join('-');
+  return s.replace(/\s+/g, '');
+}
+const isKeyRefusal = (r) => r && r.result === 'rejected' && /^(bad request|wrong key)$/i.test(r.reason || '');
+// Asks the Sheet whether it accepts a key, with a check-in it always refuses before saving anything
+// (a 1970 time and no real photo), so nothing is written to any tab. 'ok' | 'wrong' | 'unknown' (no answer).
+async function checkSyncKey(k) {
+  const ac = new AbortController(), t = setTimeout(() => ac.abort(), 25000);
+  try {
+    const res = await fetch(GOOGLE_SHEET_WEB_APP_URL, { method: 'POST', mode: 'cors', headers: { 'Content-Type': 'text/plain' }, body: JSON.stringify({ token: k, name: 'Sheet key check', section: '-', ts: 1, image: 'x', sentAt: Date.now() }), referrerPolicy: 'no-referrer', credentials: 'omit', signal: ac.signal });
+    const j = JSON.parse(await res.text());
+    if (isKeyRefusal(j)) return 'wrong';
+    return j && typeof j.result === 'string' && j.result !== 'busy' && j.result !== 'error' ? 'ok' : 'unknown';
+  } catch (e) { return 'unknown'; }
+  finally { clearTimeout(t); }
+}
+function askSyncKey() {
+  const veil = $('keyVeil'), inp = $('keyInput'), msg = $('keyMsg'), ok = $('keyOk');
+  let unchecked = '';   // a key that could not be confirmed: pressing Save again with it saves it anyway
+  $('keyText').textContent = syncKey ? 'This device is connected. Enter a new key only if the key in the Google Sheet script was changed.'
+                                     : 'Enter the key from the Google Sheet script (Script property SYNC_TOKEN). Check-ins are kept on this device until then.';
+  inp.value = ''; msg.textContent = ''; ok.disabled = false; ok.textContent = 'Save';
+  veil.hidden = false; setTimeout(() => inp.focus(), 30);
+  const finish = () => { veil.hidden = true; $('keyForm').onsubmit = null; $('keyCancel').onclick = null; };
+  $('keyCancel').onclick = finish;
+  $('keyForm').onsubmit = async (e) => {
+    e.preventDefault();
+    const k = normKey(inp.value);
+    if (k.length < 12) { msg.textContent = 'That key looks too short.'; return; }
+    const store = async (note) => {
+      try { await saveSyncKey(k); } catch (er) { msg.textContent = 'Could not save the key on this device.'; return; }
+      finish(); statusHoldUntil = 0; setStatus(note, 'ok', 4000); refreshSyncPill(); flushOutbox();
+    };
+    if (k === unchecked) return store('Sheet key saved. It will be checked with the next check-in.');
+    if (!navigator.onLine) { unchecked = k; msg.textContent = 'No internet, so the key can’t be checked now. Tap Save again to keep it anyway.'; return; }
+    ok.disabled = true; ok.textContent = 'Checking…'; msg.textContent = '';
+    const r = await checkSyncKey(k);
+    ok.disabled = false; ok.textContent = 'Save';
+    if (r === 'ok') return store('✓ Connected to the Google Sheet.');
+    unchecked = k;
+    msg.textContent = r === 'wrong' ? 'The Sheet did not accept this key. Check it, or tap Save again to keep it anyway (for example if the Sheet’s key is about to be changed).'
+                                    : 'Could not reach the Sheet to check the key. Tap Save again to keep it anyway.';
+  };
 }
 
 /* ---------- offline sync: every check-in waits in an encrypted outbox until the Sheet receives it ---------- */
@@ -1079,9 +1141,11 @@ function outboxTx(txMode, fn) {
 async function refreshSyncPill() {
   try { outboxCount = await outboxTx('readonly', s => s.count()) || 0; } catch (e) {}
   const pill = $('syncPill'); if (!pill) return;
-  pill.hidden = outboxCount === 0;
-  pill.textContent = navigator.onLine ? `Syncing ${outboxCount}…` : `Offline · ${outboxCount} saved`;
-  pill.title = `${outboxCount} check-in${outboxCount === 1 ? '' : 's'} saved on this device, sent automatically when the internet is back`;
+  const noKey = syncEnabled() && !syncKey, saved = `${outboxCount} check-in${outboxCount === 1 ? '' : 's'} saved on this device`;
+  pill.hidden = outboxCount === 0 && !noKey && !keyRejected;
+  if (noKey) { pill.textContent = `Sheet key needed · ${outboxCount} saved`; pill.title = `${saved}. Enter the Google Sheet key on the Enroll screen to send them.`; }
+  else if (keyRejected) { pill.textContent = `Sheet key not accepted · ${outboxCount} saved`; pill.title = `${saved}. The Google Sheet did not accept this device's key: enter the right one on the Enroll screen.`; }
+  else { pill.textContent = navigator.onLine ? `Syncing ${outboxCount}…` : `Offline · ${outboxCount} saved`; pill.title = `${saved}, sent automatically when the internet is back`; }
 }
 async function queueSync(payload) {
   try { const sealed = await seal(payload); await outboxTx('readwrite', s => s.put(sealed, payload.ts)); }
@@ -1095,7 +1159,7 @@ async function sendToSheet(payload, blind) {
   const ac = new AbortController(), t = setTimeout(() => ac.abort(), 45000);   // the Sheet can take a while when many check in at once
   try {
     const { errs, nextTry, ...data } = payload;   // retry bookkeeping stays on the device
-    const res = await fetch(GOOGLE_SHEET_WEB_APP_URL, { method: 'POST', mode: blind ? 'no-cors' : 'cors', headers: { 'Content-Type': 'text/plain' }, body: JSON.stringify({ ...data, token: SYNC_TOKEN, sentAt: Date.now() }), referrerPolicy: 'no-referrer', credentials: 'omit', signal: ac.signal });
+    const res = await fetch(GOOGLE_SHEET_WEB_APP_URL, { method: 'POST', mode: blind ? 'no-cors' : 'cors', headers: { 'Content-Type': 'text/plain' }, body: JSON.stringify({ ...data, token: syncKey, sentAt: Date.now() }), referrerPolicy: 'no-referrer', credentials: 'omit', signal: ac.signal });
     if (blind) return { result: 'sent' };
     const text = await res.text();
     try { const j = JSON.parse(text); if (j && typeof j.result === 'string') return { result: j.result, reason: typeof j.reason === 'string' ? j.reason : '' }; } catch (e) {}
@@ -1107,11 +1171,11 @@ let replyFails = 0;   // requests that failed while online; if replies keep fail
 async function flushOutbox() {
   if (!outboxReady) return;
   if (flushing) { flushAgain = true; return; }
-  if (!syncEnabled() || !navigator.onLine) { refreshSyncPill(); return; }
+  if (!syncEnabled() || !navigator.onLine || !syncKey) { refreshSyncPill(); return; }   // no key yet: check-ins wait safely on the device
   flushing = true;
   try {
     const keys = await outboxTx('readonly', s => s.getAllKeys()) || [];
-    let failStreak = 0;
+    let failStreak = 0, keyWorked = false;
     for (const k of keys) {
       let payload = null;
       try { payload = await unseal(await outboxTx('readonly', s => s.get(k))); } catch (e) {}
@@ -1123,6 +1187,13 @@ async function flushOutbox() {
       catch (e) {
         if (e.name !== 'AbortError') { if (navigator.onLine) replyFails++; console.warn('No reply from the Sheet, will retry', e); break; }   // offline or no reply: try all again later
         r = { result: 'error' };   // this one timed out: treat it like a check-in the Sheet could not take (below)
+      }
+      if (isKeyRefusal(r)) {
+        // The Sheet did not accept the key. Before, this check-in was thrown away; now everything stays on the device
+        // until the right key is entered. (If another check-in just went through, the key is fine and this one has a
+        // problem of its own: it is retried later like any other failure.)
+        if (!keyWorked) { keyRejected = true; console.warn('The Sheet did not accept this device’s key; check-ins stay saved here'); break; }
+        r = { result: 'error' };
       }
       if (r.result === 'busy') { console.warn('Sheet is busy, will retry', r); break; }   // stays on the device
       if (r.result === 'error') {
@@ -1136,6 +1207,7 @@ async function flushOutbox() {
         continue;
       }
       failStreak = 0; replyFails = 0;
+      if (r.result !== 'sent') { keyWorked = true; keyRejected = false; }   // a real reply from the Sheet: the key works
       if (r.result === 'sent') {   // sent without a reply: we can't know it arrived, so it goes out 3 times (repeats are ignored)
         payload.blindSends = (payload.blindSends || 0) + 1;
         if (payload.blindSends < 3) { try { const sealed = await seal(payload); await outboxTx('readwrite', s => s.put(sealed, k)); } catch (e) {} continue; }
@@ -1343,6 +1415,7 @@ async function init() {
 
   // Open the app as soon as the stored data is ready; the face engine finishes loading behind it.
   await dataP; dataVer++;
+  await loadSyncKey();
   setProgress(100, 'Ready');
   const minSplash = 450 - (performance.now() - t0);   // just long enough for the logo animation not to flicker
   if (minSplash > 0) await timeout(minSplash);
@@ -1507,6 +1580,7 @@ function askPin(kind) {
 $('tabRecognize').addEventListener('click', () => setMode('recognize'));
 $('tabEnroll').addEventListener('click', () => { if (mode !== 'enroll') askPin('unlock').then(ok => { if (ok) { setMode('enroll'); touchEnroll(); } }); });
 $('btnChangePin').addEventListener('click', () => askPin('change'));
+$('btnSheetKey').addEventListener('click', askSyncKey);   // on the Enroll screen, so it is behind the passcode
 $('btnFlip').addEventListener('click', flipCamera);
 $('btnCapture').addEventListener('click', captureEnrollment);
 $('btnSaveEnroll').addEventListener('click', saveEnrollmentName);
