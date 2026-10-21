@@ -103,17 +103,26 @@ function fromB64(s) { const bin = atob(s), out = new Uint8Array(bin.length); for
 let dbP = null;
 // The connection is reopened if the browser ever closes it (low storage, data cleared, a newer tab upgrading it)
 // or if opening it once failed, so saving never stays broken for the rest of the day.
+// Opening gives up after DB_OPEN_MS: some browsers never answer (an older copy of the app still holding the storage,
+// a stuck Safari), and waiting forever froze the app on "Starting camera…". The next call simply tries again.
+const DB_OPEN_MS = 6000;
 function openDB() {
   return dbP || (dbP = new Promise((res, rej) => {
-    const r = indexedDB.open('caipsd', 4);
+    let settled = false, r;
+    const fail = (err) => { if (settled) return; settled = true; clearTimeout(timer); dbP = null; rej(err); };
+    const timer = setTimeout(() => fail(new Error('Device storage did not open in time')), DB_OPEN_MS);
+    try { r = indexedDB.open('caipsd', 4); } catch (e) { fail(e); return; }
     r.onupgradeneeded = () => { const d = r.result; for (const s of ['k', 'photos', 'outbox', 'rec']) if (!d.objectStoreNames.contains(s)) d.createObjectStore(s); };
+    r.onblocked = () => console.warn('Device storage is held by another open copy of the app; waiting for it to let go');
     r.onsuccess = () => {
       const d = r.result;
+      if (settled) { try { d.close(); } catch (e) {} return; }   // answered after we gave up: a newer attempt takes over
+      settled = true; clearTimeout(timer);
       d.onclose = () => { dbP = null; };
       d.onversionchange = () => { try { d.close(); } catch (e) {} dbP = null; };
       res(d);
     };
-    r.onerror = () => { dbP = null; rej(r.error); };
+    r.onerror = () => fail(r.error);
   }));
 }
 // a transaction on a connection that has just been closed: forget it, so the next save opens a fresh one
@@ -136,17 +145,24 @@ async function pruneOldPhotos() {
     await new Promise((res, rej) => { const tx = db.transaction('photos', 'readwrite'); tx.objectStore('photos').delete(IDBKeyRange.upperBound(cutoff)); tx.oncomplete = res; tx.onerror = () => rej(tx.error); });
   } catch (e) {}
 }
+// The device key, or an error if the storage can't be read right now. fresh = it was just made (the old one is gone).
+let keyFresh = false;
 async function getDeviceKey() {
   try {
     const db = await openDB();
     let key = await new Promise((res, rej) => { const q = db.transaction('k').objectStore('k').get('main'); q.onsuccess = () => res(q.result); q.onerror = () => rej(q.error); });
+    keyFresh = false;
     if (!key) {
       key = await crypto.subtle.generateKey({ name: 'AES-GCM', length: 256 }, false, ['encrypt', 'decrypt']);   // non-extractable
       await new Promise((res, rej) => { const tx = db.transaction('k', 'readwrite'); tx.objectStore('k').put(key, 'main'); tx.oncomplete = res; tx.onerror = () => rej(tx.error); });
+      keyFresh = true;
     }
     return key;
-  } catch (e) { console.warn('Device key unavailable; storing unencrypted.', e); return null; }
+  } catch (e) { dbGone(e); throw e; }
 }
+// Saved faces exist on this device but could not be read: enrolling and deleting are paused, so the saved roster is
+// never replaced by a smaller one by mistake.
+let rosterUnreadable = false;
 async function seal(obj) {
   const json = JSON.stringify(obj);
   if (!deviceKey) return 'p:' + json;
@@ -172,7 +188,7 @@ async function saveNow() {
   if (!enrDirty && !recAll && !recDirty.size) { enrDirty = true; recAll = true; }   // nothing flagged: save everything
   const enr = enrDirty, all = recAll, months = new Set(recDirty);
   enrDirty = false; recAll = false; recDirty.clear();
-  if (enr) localStorage.setItem(KEY.enr, await seal(enrollments.map(x => ({ id: x.id, name: x.name, section: x.section, descriptor: Array.from(x.descriptor) }))));
+  if (enr && !rosterUnreadable) localStorage.setItem(KEY.enr, await seal(enrollments.map(x => ({ id: x.id, name: x.name, section: x.section, descriptor: Array.from(x.descriptor) }))));
   if (!all && !months.size) return 'none';
   const byMonth = new Map();
   for (const r of records) { const k = monthKey(r.ts); if (all || months.has(k)) { let l = byMonth.get(k); if (!l) byMonth.set(k, l = []); l.push(r); } }
@@ -202,20 +218,48 @@ function persist() {
   });
   return saveQueue;
 }
-async function loadRecordMonths() {
+// strict: throw if the storage can't be read (instead of returning null), so start-up can wait and try again
+async function loadRecordMonths(strict) {
   try {
     const db = await openDB();
     const vals = await new Promise((res, rej) => { const q = db.transaction('rec').objectStore('rec').getAll(); q.onsuccess = () => res(q.result || []); q.onerror = () => rej(q.error); });
     const out = [];
     for (const v of vals) { try { const l = await unseal(v); if (Array.isArray(l)) out.push(...l); } catch (e) { console.warn('A saved month is unreadable', e); } }
     return out;
-  } catch (e) { return null; }
+  } catch (e) { dbGone(e); if (strict) throw e; return null; }
+}
+// Opens the saved data at start-up. On a device that already has data, the app never starts without it:
+// starting with an empty roster used to let the next enrollment overwrite everyone's saved face.
+// So it keeps trying (and says so on screen), and if storage stays stuck it reloads once.
+// A brand-new device (or a private window with no storage) starts after two tries, as before.
+async function openSavedData() {
+  let existing = false; try { existing = !!(localStorage.getItem(KEY.enr) || localStorage.getItem(KEY.rec)); } catch (e) {}
+  for (let attempt = 1; ; attempt++) {
+    try {
+      deviceKey = await getDeviceKey();
+      return await loadRecordMonths(true);
+    } catch (err) {
+      console.warn(`Device storage did not open (try ${attempt})`, err);
+      deviceKey = null;
+      if (!existing && attempt >= 2) { console.warn('No saved data on this device and storage is unavailable; saving unencrypted.'); return null; }
+      setProgress(30, 'Opening saved data… If this stays, close any other CAIPSD Attendance windows.');
+      if (existing && attempt === 6 && watchdogAllowed()) { location.reload(); await new Promise(() => {}); }
+      await timeout(Math.min(10000, 1000 * attempt));
+    }
+  }
 }
 async function loadData() {
-  deviceKey = await getDeviceKey();
+  const monthsLoaded = await openSavedData();
+  setProgress(60, 'Loading…');
   let e = null, r = null, legacy = null;
-  try { e = await unseal(localStorage.getItem(KEY.enr)); } catch (err) { console.warn('Stored faces unreadable', err); }
-  const monthsLoaded = await loadRecordMonths();
+  const savedEnr = localStorage.getItem(KEY.enr);
+  try { e = await unseal(savedEnr); }
+  catch (err) {
+    console.warn('Stored faces unreadable', err);
+    // With a brand-new key the old faces can never be read again (the browser lost the old key), so they may be replaced.
+    // With the same key something else is wrong: keep them safe and pause enrolling.
+    if (savedEnr && !keyFresh) rosterUnreadable = true;
+  }
   r = monthsLoaded || [];
   try { legacy = await unseal(localStorage.getItem(KEY.rec)); } catch (err) { console.warn('Stored records unreadable', err); }
   if (Array.isArray(legacy) && legacy.length) {   // records saved by the previous version (all in one piece)
@@ -935,6 +979,7 @@ function exportWeekCSV() {
 }
 
 /* ---------- enrollment ---------- */
+const ROSTER_PAUSED = 'The saved faces on this device could not be read, so enrolling is paused to keep them safe. Reload the app.';
 function captureEnrollment() {
   if (!pendingEnrollDescriptor) { setStatus(recogReady ? 'No face detected right now.' : 'Face recognition is still loading…', recogReady ? 'err' : 'wait'); return; }
   capturedDescriptorForSave = pendingEnrollDescriptor;
@@ -946,6 +991,7 @@ async function saveEnrollmentName() {
   const name = clean($('enrollName').value, 60), section = clean($('enrollSection').value, 20);
   if (!name || !section) { setStatus('Please enter both name and section.', 'err'); return; }
   if (!capturedDescriptorForSave) return;
+  if (rosterUnreadable) { setStatus(ROSTER_PAUSED, 'err', 8000); return; }
   const idx = enrollments.findIndex(e => e.name.toLowerCase() === name.toLowerCase());
   if (idx < 0 && enrollments.length >= MAX_ENROLLED) { setStatus('Roster is full.', 'err'); return; }
   const entry = { id: idx >= 0 ? enrollments[idx].id : crypto.randomUUID(), name, section, descriptor: capturedDescriptorForSave };
@@ -957,6 +1003,7 @@ async function saveEnrollmentName() {
 }
 function cancelEnrollment() { capturedDescriptorForSave = null; $('nameSection').classList.add('hidden'); }
 async function deleteEnrollment(id) {
+  if (rosterUnreadable) { setStatus(ROSTER_PAUSED, 'err', 8000); return; }
   const e = enrollments.find(x => x.id === id); if (!e) return;
   if (!confirm(`Remove ${e.name} and their face data?`)) return;
   enrollments = enrollments.filter(x => x.id !== id); dataVer++;
@@ -965,7 +1012,7 @@ async function deleteEnrollment(id) {
 }
 function renderEnrolledList() {
   const box = $('enrolledList'); box.replaceChildren();
-  if (!enrollments.length) { box.appendChild(h('div', { class: 'empty', text: 'No one enrolled yet. Capture a face to add the first student.' })); return; }
+  if (!enrollments.length) { box.appendChild(h('div', { class: 'empty', text: rosterUnreadable ? ROSTER_PAUSED : 'No one enrolled yet. Capture a face to add the first student.' })); return; }
   for (const e of enrollments) {
     const left = h('span', { class: 'who' }, h('span', { class: 'avatar', text: (e.name || '?').charAt(0).toUpperCase() }), h('span', { class: 'wname', text: e.name }));
     if (e.section) left.appendChild(h('span', { class: 'pill', text: e.section }));
@@ -1047,13 +1094,15 @@ async function queueSync(payload) {
 async function sendToSheet(payload, blind) {
   const ac = new AbortController(), t = setTimeout(() => ac.abort(), 45000);   // the Sheet can take a while when many check in at once
   try {
-    const res = await fetch(GOOGLE_SHEET_WEB_APP_URL, { method: 'POST', mode: blind ? 'no-cors' : 'cors', headers: { 'Content-Type': 'text/plain' }, body: JSON.stringify({ ...payload, token: SYNC_TOKEN, sentAt: Date.now() }), referrerPolicy: 'no-referrer', credentials: 'omit', signal: ac.signal });
+    const { errs, nextTry, ...data } = payload;   // retry bookkeeping stays on the device
+    const res = await fetch(GOOGLE_SHEET_WEB_APP_URL, { method: 'POST', mode: blind ? 'no-cors' : 'cors', headers: { 'Content-Type': 'text/plain' }, body: JSON.stringify({ ...data, token: SYNC_TOKEN, sentAt: Date.now() }), referrerPolicy: 'no-referrer', credentials: 'omit', signal: ac.signal });
     if (blind) return { result: 'sent' };
     const text = await res.text();
     try { const j = JSON.parse(text); if (j && typeof j.result === 'string') return { result: j.result, reason: typeof j.reason === 'string' ? j.reason : '' }; } catch (e) {}
     return { result: 'error' };   // not a reply from our script (e.g. a Google error page): try again later
   } finally { clearTimeout(t); }
 }
+const OUTBOX_RETRY_MAX_MS = 30 * 60 * 1000;
 let replyFails = 0;   // requests that failed while online; if replies keep failing, fall back to sending without a reply
 async function flushOutbox() {
   if (!outboxReady) return;
@@ -1062,16 +1111,31 @@ async function flushOutbox() {
   flushing = true;
   try {
     const keys = await outboxTx('readonly', s => s.getAllKeys()) || [];
+    let failStreak = 0;
     for (const k of keys) {
       let payload = null;
       try { payload = await unseal(await outboxTx('readonly', s => s.get(k))); } catch (e) {}
       if (!payload) { await outboxTx('readwrite', s => s.delete(k)); continue; }   // unreadable entry, drop it
+      if (payload.nextTry && Date.now() < payload.nextTry) continue;               // failed recently: its turn comes later
       const blind = replyFails >= 3;
       let r;
       try { r = await sendToSheet(payload, blind); }
-      catch (e) { if (navigator.onLine && e.name !== 'AbortError') replyFails++; console.warn('No reply from the Sheet, will retry', e); break; }
-      if (r.result === 'busy' || r.result === 'error') { console.warn('Sheet could not save it yet, will retry', r); break; }   // stays on the device
-      replyFails = 0;
+      catch (e) {
+        if (e.name !== 'AbortError') { if (navigator.onLine) replyFails++; console.warn('No reply from the Sheet, will retry', e); break; }   // offline or no reply: try all again later
+        r = { result: 'error' };   // this one timed out: treat it like a check-in the Sheet could not take (below)
+      }
+      if (r.result === 'busy') { console.warn('Sheet is busy, will retry', r); break; }   // stays on the device
+      if (r.result === 'error') {
+        // The Sheet could not take this check-in. It stays on the device and is tried again later, waiting longer each
+        // time (1, 2, 4 … up to 30 minutes), and the check-ins behind it carry on, so one problem never holds up everyone.
+        payload.errs = (payload.errs || 0) + 1;
+        payload.nextTry = Date.now() + Math.min(OUTBOX_RETRY_MAX_MS, 60000 * 2 ** Math.min(payload.errs - 1, 5));
+        console.warn(`Sheet could not save ${payload.name}'s check-in (try ${payload.errs}), will retry`, r);
+        try { const sealed = await seal(payload); await outboxTx('readwrite', s => s.put(sealed, k)); } catch (e) {}
+        if (++failStreak >= 2) break;   // two different check-ins failing in a row: the Sheet itself is having trouble
+        continue;
+      }
+      failStreak = 0; replyFails = 0;
       if (r.result === 'sent') {   // sent without a reply: we can't know it arrived, so it goes out 3 times (repeats are ignored)
         payload.blindSends = (payload.blindSends || 0) + 1;
         if (payload.blindSends < 3) { try { const sealed = await seal(payload); await outboxTx('readwrite', s => s.put(sealed, k)); } catch (e) {} continue; }
