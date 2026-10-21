@@ -471,6 +471,7 @@ function engineOk() { engineFails = 0; }
 function engineFailed(e) {
   if (++engineFails === 40) {   // ~40 failures in a row: the engine is broken, not just one bad frame
     console.error('Face engine keeps failing, restarting', e);
+    if (!watchdogAllowed()) { setStatus('Face engine stopped working. Close and reopen the app.', 'err', 600000); return; }
     setStatus('Face engine stopped working. Restarting…', 'err', 15000);
     reloadWhenFree(30000);   // it can't check anyone in while broken, so don't wait long for an empty camera
   }
@@ -1367,7 +1368,7 @@ async function init() {
   for (let attempt = 1; ; attempt++) {
     try {
       await (attempt === 1 ? libP : faceLibLoaded());
-      if (!backendSet) { backendSet = true; try { await faceapi.tf.setBackend('webgl'); await faceapi.tf.ready(); } catch (e) { console.warn('WebGL unavailable', e); } }
+      if (!backendSet) { backendSet = true; try { await faceapi.tf.setBackend('webgl'); await faceapi.tf.ready(); watchGraphics(); } catch (e) { console.warn('WebGL unavailable', e); } }
       // Small models first (they're needed to see a face); the big recognition model is downloaded meanwhile
       // but only set up afterwards, so the two don't fight over the graphics chip.
       if (!recogFile) { recogFile = faceapi.nets.faceRecognitionNet.loadFromUri(MODEL_URL); recogFile.catch(() => {}); }
@@ -1391,6 +1392,22 @@ async function init() {
   faLoop();
   loadRecognition(recogFile);
   perfFrom = performance.now() + 6000;   // ignore start-up warm-up when judging speed
+}
+
+// Phones drop the graphics chip's memory (the WebGL context) under memory pressure or after switching apps.
+// The face engine can't continue after that (its next step simply never finishes), so restart the app soon,
+// whether or not someone is at the camera: nobody can check in until it restarts.
+function watchGraphics() {
+  try {
+    const canvas = faceapi.tf.backend().gpgpu.gl.canvas;
+    canvas.addEventListener('webglcontextlost', () => {
+      console.error('Graphics context lost, restarting the face engine');
+      if (!watchdogAllowed()) { setStatus('Face engine stopped. Close and reopen the app.', 'err', 600000); return; }
+      statusHoldUntil = 0;
+      setStatus('Face engine stopped. Restarting…', 'err', 600000);
+      reloadWhenFree(5000);
+    }, { once: true });
+  } catch (e) { console.warn('Graphics watch unavailable', e); }
 }
 
 // The big recognition model: set up after the small ones; downloaded again if that failed.
@@ -1576,7 +1593,9 @@ setInterval(() => {
   loopSuspect = false; loopBeat = performance.now();
   if (!watchdogAllowed()) return;   // at most one watchdog reload every 10 minutes
   console.error('Face engine loop stopped, reloading');
-  reloadWhenFree();
+  statusHoldUntil = 0;
+  setStatus('Face engine stopped. Restarting…', 'err', 600000);
+  reloadWhenFree(30000);   // a stopped engine can't check anyone in, so don't wait long for an empty camera
 }, 5000);
 
 // Recognition stuck: one recognition step has not finished for 20 s (a hung graphics driver). Faces would still be
@@ -1604,16 +1623,18 @@ setInterval(() => {
     } catch (e) {}
   }
   const quietFor = performance.now() - (Number.isFinite(lastFaceAt) ? lastFaceAt : 0);
-  if (Date.now() - BOOT_AT > 12 * 3600e3 && navigator.onLine && quietFor > 10 * 60e3 && !tracks.length) {
+  if (Date.now() - BOOT_AT > 12 * 3600e3 && navigator.onLine && quietFor > 10 * 60e3) {
     console.info('Running for 12 hours: fresh start while nobody is at the camera');
     reloadWhenFree();
   }
 }, 60000);
-// at most one automatic recovery reload every 10 minutes (so a device that keeps failing never reload-loops)
+// at most 3 automatic recovery reloads in 10 minutes (so a device that keeps failing never reload-loops)
 function watchdogAllowed() {
-  let last = 0; try { last = Number(sessionStorage.getItem('watchdogAt')) || 0; } catch (e) {}
-  if (Date.now() - last < 10 * 60 * 1000) return false;
-  try { sessionStorage.setItem('watchdogAt', String(Date.now())); } catch (e) {}
+  const now = Date.now();
+  let list = []; try { list = JSON.parse(sessionStorage.getItem('watchdogTimes') || '[]').filter(t => Number.isFinite(t) && now - t < 10 * 60 * 1000); } catch (e) {}
+  if (list.length >= 3) return false;
+  list.push(now);
+  try { sessionStorage.setItem('watchdogTimes', JSON.stringify(list)); } catch (e) {}
   return true;
 }
 window.addEventListener('unhandledrejection', (e) => console.warn('Unhandled', e.reason));
@@ -1651,7 +1672,9 @@ function reloadWhenFree(maxWaitMs) {
   // wait for saves to finish, plus a moment for the newest check-in to reach the on-device outbox
   saveQueue.then(() => timeout(400)).then(() => location.reload());
 }
-function hadFaceRecently() { return (typeof lastFaceAt === 'number' && performance.now() - lastFaceAt < 8000) || tracks.length > 0; }
+// Judged only by when a face was last actually seen: the face list itself stops updating if the engine stops,
+// and a stale face in it used to make a broken app wait forever for "the person" to leave.
+function hadFaceRecently() { return typeof lastFaceAt === 'number' && performance.now() - lastFaceAt < 8000; }
 
 init().catch(err => { console.error(err); const sp = $('splashStatus'); if (sp && document.body.contains(sp)) sp.textContent = 'Failed to load: ' + err.message; else setStatus('Face engine failed to load: ' + err.message + ' Reload the page.', 'err', 60000); });
 })();
