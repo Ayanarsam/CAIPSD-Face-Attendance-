@@ -10,7 +10,7 @@
 <meta name="apple-mobile-web-app-capable" content="yes">
 <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
 <meta name="apple-mobile-web-app-title" content="CAIPSD Attendance">
-<meta http-equiv="Content-Security-Policy" content="default-src 'none'; manifest-src 'self'; script-src 'self' https://cdn.jsdelivr.net/npm/face-api.js@0.22.2/ https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@0.10.14/ 'wasm-unsafe-eval'; style-src 'unsafe-inline' https://fonts.googleapis.com; font-src https://fonts.gstatic.com; img-src 'self' data: blob:; media-src 'self' blob:; connect-src https://cdn.jsdelivr.net/npm/@vladmandic/face-api@1.7.13/model/ https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@0.10.14/ https://storage.googleapis.com/mediapipe-models/face_landmarker/ https://storage.googleapis.com/mediapipe-models/image_embedder/ https://script.google.com/macros/s/ https://script.googleusercontent.com data: blob:; worker-src 'self' blob: https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@0.10.14/; base-uri 'none'; form-action 'none'; object-src 'none'">
+<meta http-equiv="Content-Security-Policy" content="default-src 'none'; manifest-src 'self'; script-src 'self' https://cdn.jsdelivr.net/npm/@vladmandic/face-api@1.7.13/dist/ https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@0.10.14/ 'wasm-unsafe-eval'; style-src 'unsafe-inline' https://fonts.googleapis.com; font-src https://fonts.gstatic.com; img-src 'self' data: blob:; media-src 'self' blob:; connect-src https://cdn.jsdelivr.net/npm/@vladmandic/face-api@1.7.13/model/ https://cdn.jsdelivr.net/npm/@tensorflow/tfjs-backend-wasm@4.16.0/dist/ https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@0.10.14/ https://storage.googleapis.com/mediapipe-models/face_landmarker/ https://storage.googleapis.com/mediapipe-models/image_embedder/ https://script.google.com/macros/s/ https://script.googleusercontent.com data: blob:; worker-src 'self' blob: https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@0.10.14/; base-uri 'none'; form-action 'none'; object-src 'none'">
 <meta name="referrer" content="no-referrer">
 <meta name="robots" content="noindex, nofollow">
 <title>CAIPSD Attendance</title>
@@ -25,7 +25,7 @@
 <link rel="preload" as="fetch" crossorigin href="https://cdn.jsdelivr.net/npm/@vladmandic/face-api@1.7.13/model/face_landmark_68_model.bin">
 <link rel="preload" as="fetch" crossorigin fetchpriority="low" href="https://cdn.jsdelivr.net/npm/@vladmandic/face-api@1.7.13/model/face_recognition_model-weights_manifest.json">
 <link rel="preload" as="fetch" crossorigin fetchpriority="low" href="https://cdn.jsdelivr.net/npm/@vladmandic/face-api@1.7.13/model/face_recognition_model.bin">
-<link id="faceLib" rel="preload" as="script" fetchpriority="high" href="https://cdn.jsdelivr.net/npm/face-api.js@0.22.2/dist/face-api.min.js" integrity="sha384-gzn2n++arkvyhdNLmUf1s6F5NZ8iAbZ7FhIt+Zw7Jlf1n/vNTmZ3+cYr7S4ogyco" crossorigin="anonymous">
+<link id="faceLib" rel="preload" as="script" fetchpriority="high" href="https://cdn.jsdelivr.net/npm/@vladmandic/face-api@1.7.13/dist/face-api.js" integrity="sha384-5SEinnOIOK1Nl6bzEIWwfXWMg4EaJhN2bXKgrjYC0Bq+fYNZHwhD3ntM92lTHnfL" crossorigin="anonymous">
 <script type="application/json" id="config">{"sheetUrl": "https://script.google.com/macros/s/AKfycbyadv7Q4GHWnG9XsP8J8a0rzYZJRYBsdilYWMNmMEhM0s51R6iLd0X7rM523Pzom53i/exec", "token": "YbkeTXd27kUurquK_bEcztDRMerQqCi3"}</script>
 <style>
   :root {
@@ -528,9 +528,9 @@
     </div>
   </main>
 
-  <footer class="foot">Centre of AI &amp; Professional Skills Development (CAIPSD), The Islamia University of Bahawalpur<span class="app-version" id="appVersion">CAIPSD Attendance · Version 2026.10.22.3</span></footer>
+  <footer class="foot">Centre of AI &amp; Professional Skills Development (CAIPSD), The Islamia University of Bahawalpur<span class="app-version" id="appVersion">CAIPSD Attendance · Version 2026.10.22.4</span></footer>
 </div>
 
-<script src="app.js?v=2026.10.22.3"></script>
+<script src="app.js?v=2026.10.22.4"></script>
 </body>
 </html>

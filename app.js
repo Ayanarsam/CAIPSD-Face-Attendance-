@@ -14,6 +14,7 @@ const GOOGLE_SHEET_WEB_APP_URL = typeof CONFIG.sheetUrl === 'string' ? CONFIG.sh
 const SYNC_TOKEN = typeof CONFIG.token === 'string' ? CONFIG.token : '';
 const MAX_ENROLLED = 2000;
 const MODEL_URL = "https://cdn.jsdelivr.net/npm/@vladmandic/face-api@1.7.13/model";
+const WASM_URL = "https://cdn.jsdelivr.net/npm/@tensorflow/tfjs-backend-wasm@4.16.0/dist/";
 const KEY = { enr: 'caipsd2_enr', rec: 'caipsd2_rec', oldEnr: 'eyeAttendance_enrollments', oldRec: 'eyeAttendance_records' };
 
 // Speed / accuracy tuning
@@ -1457,7 +1458,7 @@ async function init() {
   for (let attempt = 1; ; attempt++) {
     try {
       await (attempt === 1 ? libP : faceLibLoaded());
-      if (!backendSet) { backendSet = true; try { await faceapi.tf.setBackend('webgl'); await faceapi.tf.ready(); watchGraphics(); } catch (e) { console.warn('WebGL unavailable', e); } }
+      if (!backendSet) { backendSet = true; await pickBackend(); }
       // Small models first (they're needed to see a face); the big recognition model is downloaded meanwhile
       // but only set up afterwards, so the two don't fight over the graphics chip.
       if (!recogFile) { recogFile = faceapi.nets.faceRecognitionNet.loadFromUri(MODEL_URL); recogFile.catch(() => {}); }
@@ -1481,6 +1482,20 @@ async function init() {
   faLoop();
   loadRecognition(recogFile);
   perfFrom = performance.now() + 6000;   // ignore start-up warm-up when judging speed
+}
+
+// Where the face engine runs. WASM (the phone's processor) is ready in a few seconds; the graphics chip (WebGL) first
+// has to prepare dozens of programs, which took 15-30 s on phones before anyone could check in. WebGL is the fallback
+// for a browser that can't run WASM.
+async function pickBackend() {
+  try {
+    faceapi.tf.setWasmPaths(WASM_URL);
+    if (await faceapi.tf.setBackend('wasm')) { await faceapi.tf.ready(); bootMark('face engine: wasm'); return; }
+  } catch (e) { console.warn('WASM engine unavailable, using the graphics chip', e); }
+  try {
+    faceapi.tf.env().set('WEBGL_USE_SHAPES_UNIFORMS', true);   // fewer programs to prepare (one per kind, not per size)
+    await faceapi.tf.setBackend('webgl'); await faceapi.tf.ready(); watchGraphics(); bootMark('face engine: webgl');
+  } catch (e) { console.warn('WebGL unavailable', e); }
 }
 
 // The MediaPipe blink engine is loaded after recognition is ready: loading it at start-up competed with the face
