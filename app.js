@@ -47,6 +47,12 @@ let statusHoldUntil = 0, lastStatusKey = '', stepsKey = '', highlightTs = 0;
 let view = { cw: 0, ch: 0, dpr: 1 };
 
 const $ = (id) => document.getElementById(id);
+
+/* Start-up timeline: when each step finished, counted from the moment the page opened.
+   Tap the version number at the bottom 5 times to see it (handy for a screenshot when a phone starts slowly). */
+const bootLog = [];
+function bootMark(what) { if (bootLog.length < 40 && !bootLog.some(b => b[1] === what)) bootLog.push([Math.round(performance.now()), what]); }
+bootMark('app code started');
 const enc = new TextEncoder(), dec = new TextDecoder();
 const clamp01 = (v) => v < 0 ? 0 : v > 1 ? 1 : v;
 
@@ -298,7 +304,23 @@ async function openCamera() {
   stopCamera();
   clearTimeout(camRetryTimer);
   try {
-    const stream = await navigator.mediaDevices.getUserMedia({ video: { facingMode: facing, width: { ideal: 640 }, height: { ideal: 480 }, frameRate: { ideal: 30, max: 30 } }, audio: false });
+    bootMark('camera asked');
+    const gumP = navigator.mediaDevices.getUserMedia({ video: { facingMode: facing, width: { ideal: 640 }, height: { ideal: 480 }, frameRate: { ideal: 30, max: 30 } }, audio: false });
+    // Some phones never answer (the camera is still held by the app's previous run, a stuck camera service).
+    // Once camera access is already allowed, give up after CAM_ANSWER_MS and ask again. Never while the
+    // "Allow camera?" question is on screen: that waits for the person.
+    const allowed = await cameraAllowed();
+    const stream = !allowed ? await gumP : await new Promise((res, rej) => {
+      let settled = false;
+      const t = setTimeout(() => {
+        if (settled) return; settled = true;
+        gumP.then(s => s.getTracks().forEach(tr => tr.stop())).catch(() => {});   // if it answers later, let it go
+        const e = new Error('the camera did not answer'); e.name = 'TimeoutError'; rej(e);
+      }, CAM_ANSWER_MS);
+      gumP.then(s => { if (settled) return; settled = true; clearTimeout(t); res(s); },
+                err => { if (settled) return; settled = true; clearTimeout(t); rej(err); });
+    });
+    bootMark('camera answered');
     mediaStream = stream;
     stream.getVideoTracks().forEach(t => t.addEventListener('ended', () => { if (mediaStream === stream) cameraLost('Camera disconnected.'); }));
     video.srcObject = stream;
@@ -309,6 +331,7 @@ async function openCamera() {
       video.onloadedmetadata = () => { clearTimeout(t); res(); };
     });
     video.play().catch(() => {});
+    if (video.requestVideoFrameCallback) video.requestVideoFrameCallback(() => bootMark('first camera picture'));
     camError = ''; camRetryDelay = 3000; tracks = [];
     lastFrameTime = -1; lastFrameAt = performance.now();
     statusHoldUntil = 0;   // clear a "camera error" message that was holding the status bar
@@ -317,7 +340,10 @@ async function openCamera() {
     return true;
   } catch (err) {
     stopCamera();
-    camError = err.name === 'NotAllowedError' ? 'Camera blocked. Allow camera access in the browser settings.'
+    bootMark('camera problem: ' + (err.name || 'error'));
+    if (err.name === 'TimeoutError') camRetryDelay = 500;   // nothing is wrong with the settings: ask again straight away
+    camError = err.name === 'TimeoutError' ? 'The camera is slow to start.'
+             : err.name === 'NotAllowedError' ? 'Camera blocked. Allow camera access in the browser settings.'
              : err.name === 'NotReadableError' ? 'The camera is busy (another app may be using it).'
              : err.name === 'NotFoundError' ? 'No camera found. Check the camera cable.'
              : 'Camera problem: ' + err.message + '.';
@@ -326,6 +352,11 @@ async function openCamera() {
     scheduleCameraRetry();
     return false;
   }
+}
+const CAM_ANSWER_MS = 6000;
+// true when camera access is already allowed (so no "Allow camera?" question can be on screen)
+async function cameraAllowed() {
+  try { return navigator.permissions && (await navigator.permissions.query({ name: 'camera' })).state === 'granted'; } catch (e) { return false; }
 }
 function scheduleCameraRetry() {
   clearTimeout(camRetryTimer);
@@ -351,6 +382,12 @@ setInterval(() => {
   else if (performance.now() - lastFrameAt > 8000) cameraLost('The camera stopped sending pictures.');
 }, 3000);
 function stopCamera() { if (mediaStream) mediaStream.getTracks().forEach(t => t.stop()); mediaStream = null; }
+// Let go of the camera as soon as the page goes away (a restart, an update, closing the app). Otherwise the phone may
+// keep it busy for several seconds and the next start waits for it with a black camera box.
+window.addEventListener('pagehide', () => {
+  stopCamera();
+  try { sessionStorage.setItem('caipsd_lastBoot', JSON.stringify({ at: Date.now(), v: appVersion(), log: bootLog, why: reloadWhy || 'closed' })); } catch (e) {}
+});
 async function flipCamera() { facing = facing === 'user' ? 'environment' : 'user'; tracks = []; await startCamera(); }
 
 /* ---------- detection: a fast eye/blink loop that never waits for face recognition ---------- */
@@ -394,7 +431,7 @@ async function loadMediapipe() {
       outputFaceBlendshapes: true, runningMode: "VIDEO", numFaces: WEAK_DEVICE ? 1 : 2, minFaceDetectionConfidence: 0.5, minTrackingConfidence: 0.5
     });
     try { faceLandmarker = await make('GPU'); } catch (e) { faceLandmarker = await make('CPU'); }
-    engine = 'mp'; tracks = [];
+    engine = 'mp'; tracks = []; bootMark('blink engine ready');
     mpLoop();
   } catch (e) { console.warn('MediaPipe unavailable, using face-api blink detection', e); faceLandmarker = null; engine = 'faceapi'; }
   finally { mpLoading = false; }
@@ -474,7 +511,7 @@ function engineFailed(e) {
     console.error('Face engine keeps failing, restarting', e);
     if (!watchdogAllowed()) { setStatus('Face engine stopped working. Close and reopen the app.', 'err', 600000); return; }
     setStatus('Face engine stopped working. Restarting…', 'err', 15000);
-    reloadWhenFree(30000);   // it can't check anyone in while broken, so don't wait long for an empty camera
+    reloadWhenFree(30000, 'face engine failing');   // it can't check anyone in while broken, so don't wait long for an empty camera
   }
 }
 let idCost = 120, idNextAt = 0, idStartedAt = 0;
@@ -1398,7 +1435,7 @@ async function init() {
   renderEnrolledList(); renderLog();
   const tickClock = () => { const n = new Date(); $('clock').textContent = n.toLocaleTimeString([], { hour: 'numeric', minute: '2-digit' }); $('todayDate').textContent = n.toLocaleDateString('en-US', { weekday: 'short', month: 'short', day: 'numeric', year: 'numeric' }); };
   tickClock(); setInterval(tickClock, 15000);
-  const app = $('app'); app.classList.remove('hidden'); app.classList.add('enter');
+  const app = $('app'); app.classList.remove('hidden'); app.classList.add('enter'); bootMark('app on screen');
   sizeOverlay();
   if (window.ResizeObserver) new ResizeObserver(sizeOverlay).observe($('ring')); else window.addEventListener('resize', sizeOverlay);
   $('splash').classList.add('out'); setTimeout(() => { $('splash').remove(); app.classList.remove('enter'); }, 700);
@@ -1437,7 +1474,7 @@ async function init() {
     }
   }
   await Promise.race([warmDetector(), timeout(1500)]);
-  engineReady = true;
+  engineReady = true; bootMark('face engine ready');
   statusHoldUntil = 0;
   if (!tracks.length && !camError) setStatus('Look at the camera and blink once.', 'wait');
   else if (camError) setStatus(camError + ' Retrying…', 'err', 600000);
@@ -1466,7 +1503,7 @@ function watchGraphics() {
       if (!watchdogAllowed()) { setStatus('Face engine stopped. Close and reopen the app.', 'err', 600000); return; }
       statusHoldUntil = 0;
       setStatus('Face engine stopped. Restarting…', 'err', 600000);
-      reloadWhenFree(5000);
+      reloadWhenFree(5000, 'graphics chip reset');
     }, { once: true });
   } catch (e) { console.warn('Graphics watch unavailable', e); }
 }
@@ -1477,7 +1514,7 @@ async function loadRecognition(firstTry) {
     try {
       await (attempt === 1 && firstTry ? firstTry : faceapi.nets.faceRecognitionNet.isLoaded || faceapi.nets.faceRecognitionNet.loadFromUri(MODEL_URL));
       await warmIdentity();   // prepares the exact recognition steps used at check-in, so the first person never hits a freeze
-      recogFailed = false; recogReady = true; tracks.forEach(t => { t.name = null; });
+      recogFailed = false; recogReady = true; tracks.forEach(t => { t.name = null; }); bootMark('recognition ready (check-ins work)');
       loadMediapipeWhenQuiet(Date.now());
       setTimeout(warmWide, 1500);
       setTimeout(() => later(loadBackgroundCheck), 4000);
@@ -1645,6 +1682,31 @@ $('btnInstall').addEventListener('click', async () => {
   }
 });
 
+// Start-up timeline panel: tap the version number 5 times
+function appVersion() { const el = $('appVersion'); const m = el && /(\d{4}\.\d+\.\d+(\.\d+)?)/.exec(el.textContent); return m ? m[1] : '?'; }
+function deviceLine() {
+  const ua = navigator.userAgent, os = (/Android [\d.]+/.exec(ua) || /(iPhone|iPad); CPU [^)]*OS [\d_]+/.exec(ua) || /Windows NT [\d.]+|Mac OS X [\d_]+/.exec(ua) || ['?'])[0].replace(/_/g, '.');
+  const br = (/(Chrome|CriOS|Firefox|FxiOS|Edg|SamsungBrowser)\/(\d+)/.exec(ua) || /Version\/(\d+).*Safari/.exec(ua) || ['?'])[0];
+  return `${os} · ${br} · ${navigator.hardwareConcurrency || '?'} cores · ${navigator.deviceMemory || '?'} GB · ${isInstalled() ? 'installed app' : 'browser'}`;
+}
+function showBootTimes() {
+  const old = $('bootPanel'); if (old) { old.remove(); return; }
+  const fmt = (log) => log.map(([t, w]) => `${(t / 1000).toFixed(1).padStart(5)} s  ${w}`).join('\n');
+  let text = `Start-up times · version ${appVersion()}\n${deviceLine()}\n\n${fmt(bootLog)}`;
+  try {
+    const prev = JSON.parse(sessionStorage.getItem('caipsd_lastBoot') || 'null');
+    if (prev && Date.now() - prev.at < 15 * 60e3 && Array.isArray(prev.log)) text += `\n\nPrevious start (version ${clean(prev.v, 20)}, ended: ${clean(prev.why, 20)})\n${fmt(prev.log.filter(x => Array.isArray(x) && Number.isFinite(x[0])).map(x => [x[0], clean(x[1], 60)]))}`;
+  } catch (e) {}
+  const panel = h('div', { id: 'bootPanel' }, h('pre', { text }), h('button', { class: 'btn btn-sm', text: 'Close', onclick: () => panel.remove() }));
+  panel.style.cssText = 'position:fixed;left:12px;right:12px;bottom:12px;z-index:9999;background:#06112B;color:#E8EEFF;border:1px solid rgba(255,255,255,.25);border-radius:16px;padding:14px;max-height:70vh;overflow:auto;box-shadow:0 20px 50px rgba(0,0,0,.5)';
+  panel.firstChild.style.cssText = 'margin:0 0 10px;white-space:pre-wrap;font:12px/1.5 ui-monospace,Menlo,Consolas,monospace';
+  document.body.appendChild(panel);
+}
+{ let taps = [];
+  const v = $('appVersion');
+  if (v) v.addEventListener('click', () => { const n = Date.now(); taps = taps.filter(t => n - t < 6000); taps.push(n); if (taps.length >= 5) { taps = []; showBootTimes(); } });
+}
+
 // keep the screen on while CAIPSD Attendance is open (re-acquired when the page comes back into view)
 let wakeLock = null;
 async function keepAwake() {
@@ -1669,7 +1731,7 @@ setInterval(() => {
   console.error('Face engine loop stopped, reloading');
   statusHoldUntil = 0;
   setStatus('Face engine stopped. Restarting…', 'err', 600000);
-  reloadWhenFree(30000);   // a stopped engine can't check anyone in, so don't wait long for an empty camera
+  reloadWhenFree(30000, 'face engine stopped');   // a stopped engine can't check anyone in, so don't wait long for an empty camera
 }, 5000);
 
 // Recognition stuck: one recognition step has not finished for 20 s (a hung graphics driver). Faces would still be
@@ -1679,7 +1741,7 @@ setInterval(() => {
   if (!watchdogAllowed()) return;
   console.error('Face recognition is stuck, reloading');
   setStatus('Face recognition stopped responding. Restarting…', 'err', 15000);
-  reloadWhenFree(30000);
+  reloadWhenFree(30000, 'recognition stuck');
 }, 5000);
 
 // Long days: the office device stays open for days. Every minute, check that the graphics memory used by the face
@@ -1693,13 +1755,13 @@ setInterval(() => {
     try {
       const n = faceapi.tf.memory().numTensors;
       if (!tensorBase) tensorBase = n;
-      else if (n > tensorBase + 1500 && watchdogAllowed()) { console.warn(`Face engine memory grew (${tensorBase} → ${n} tensors), refreshing`); reloadWhenFree(); return; }
+      else if (n > tensorBase + 1500 && watchdogAllowed()) { console.warn(`Face engine memory grew (${tensorBase} → ${n} tensors), refreshing`); reloadWhenFree(undefined, 'memory refresh'); return; }
     } catch (e) {}
   }
   const quietFor = performance.now() - (Number.isFinite(lastFaceAt) ? lastFaceAt : 0);
   if (Date.now() - BOOT_AT > 12 * 3600e3 && navigator.onLine && quietFor > 10 * 60e3) {
     console.info('Running for 12 hours: fresh start while nobody is at the camera');
-    reloadWhenFree();
+    reloadWhenFree(undefined, '12-hour refresh');
   }
 }, 60000);
 // at most 3 automatic recovery reloads in 10 minutes (so a device that keeps failing never reload-loops)
@@ -1718,8 +1780,8 @@ window.addEventListener('unhandledrejection', (e) => console.warn('Unhandled', e
 // and reload into it when nobody is standing at the camera.
 if ('serviceWorker' in navigator && location.protocol === 'https:') {
   const hadController = !!navigator.serviceWorker.controller;
-  navigator.serviceWorker.addEventListener('controllerchange', () => { if (hadController) reloadWhenFree(); });
-  navigator.serviceWorker.addEventListener('message', (e) => { if (e.data && e.data.type === 'page-updated') reloadWhenFree(); });
+  navigator.serviceWorker.addEventListener('controllerchange', () => { if (hadController) reloadWhenFree(undefined, 'update'); });
+  navigator.serviceWorker.addEventListener('message', (e) => { if (e.data && e.data.type === 'page-updated') reloadWhenFree(undefined, 'update'); });
   window.addEventListener('load', () => navigator.serviceWorker.register('sw.js', { updateViaCache: 'none' }).then(reg => {
     // reg.update() only notices a changed sw.js; the page itself is checked by the service worker
     const checkForUpdate = () => {
@@ -1733,9 +1795,10 @@ if ('serviceWorker' in navigator && location.protocol === 'https:') {
 }
 // reload only when nobody is checking in, enrolling or typing (and the newest check-in has been saved).
 // maxWaitMs: for a broken engine, don't wait for an empty camera longer than this (it can't check anyone in anyway).
-let reloading = false, reloadTimer = 0, reloadSince = 0, reloadMaxWait = Infinity;
-function reloadWhenFree(maxWaitMs) {
+let reloading = false, reloadTimer = 0, reloadSince = 0, reloadMaxWait = Infinity, reloadWhy = '';
+function reloadWhenFree(maxWaitMs, why) {
   if (reloading) return;
+  if (typeof why === 'string' && !reloadWhy) reloadWhy = why;
   if (!reloadSince) reloadSince = performance.now();
   if (maxWaitMs) reloadMaxWait = Math.min(reloadMaxWait, maxWaitMs);
   clearTimeout(reloadTimer);   // only one waiting check at a time
