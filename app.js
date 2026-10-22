@@ -441,12 +441,14 @@ async function loadMediapipe() {
 /* Engine A (until MediaPipe is ready): face-api box + 68 landmarks every frame.
    Identity is computed in the same pass only when a face actually needs it. */
 let hadFace = false, faScan = 0, faWide = false, faMiss = 0;
-async function faLoop() {
-  if (engine !== 'faceapi') return;
+let faGen = 0;   // each start of the loop gets a number, so an old copy of the loop stops instead of running twice
+async function faLoop(gen) {
+  if (gen === undefined) gen = ++faGen;
+  if (engine !== 'faceapi' || gen !== faGen) return;
   loopBeat = performance.now();
   try { await faFrame(); engineOk(); } catch (e) { console.warn(e); engineFailed(e); }
   // until recognition is ready nobody can be checked in, so track gently and leave the graphics chip to the warm-up
-  setTimeout(faLoop, !recogReady ? 250 : hadFace ? (isLite() ? 30 : 0) : 150);
+  setTimeout(() => faLoop(gen), !recogReady ? 250 : hadFace ? (isLite() ? 30 : 0) : 150);
 }
 async function faFrame() {
   if (document.hidden || !video || video.readyState < 2 || !video.videoWidth) { hadFace = false; return; }
@@ -482,10 +484,23 @@ function mpLoop() {
   const idle = !hadFace && performance.now() - lastFaceAt > 1500;   // nobody there: check ~6 times a second instead of 30
   setTimeout(mpLoop, document.hidden ? 250 : idle ? 160 : Math.max(recogReady ? 4 : 50, (isLite() ? 45 : 33) - cost));
 }
+// The blink engine runs on the graphics chip; phones sometimes take that away (switching apps, low memory) and then
+// every frame fails. Instead of restarting the app, switch back to the face-api engine (it keeps checking people in)
+// and try the blink engine again a minute later.
+let mpFails = 0, mpDrops = 0;
+function mpFailed(e) {
+  if (++mpFails < 20) return;   // ~20 frames in a row: it's broken, not one bad frame
+  console.warn('Blink engine stopped working, switching to the backup engine', e);
+  bootMark('blink engine dropped');
+  try { faceLandmarker.close(); } catch (err) {}
+  faceLandmarker = null; mpFails = 0; tracks = []; engine = 'faceapi';
+  if (engineReady) faLoop();
+  if (++mpDrops <= 3) setTimeout(() => loadMediapipeWhenQuiet(Date.now()), 60000);   // at most 3 retries per run
+}
 function mpStep() {
   if (document.hidden || !video || video.readyState < 2 || !video.videoWidth || video.currentTime === lastVideoTime) return;
   lastVideoTime = video.currentTime;
-  let res; try { res = faceLandmarker.detectForVideo(video, performance.now()); engineOk(); } catch (e) { engineFailed(e); return; }
+  let res; try { res = faceLandmarker.detectForVideo(video, performance.now()); mpFails = 0; } catch (e) { mpFailed(e); return; }
   const W = video.videoWidth, H = video.videoHeight, faces = [];
   for (let i = 0; i < res.faceLandmarks.length; i++) {
     const lm = res.faceLandmarks[i];
