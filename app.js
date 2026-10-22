@@ -313,7 +313,7 @@ async function openCamera() {
     lastFrameTime = -1; lastFrameAt = performance.now();
     statusHoldUntil = 0;   // clear a "camera error" message that was holding the status bar
     setStatus(engineReady ? 'Camera ready. Look at the camera.' : 'Starting face engine…', 'wait');
-    loadMediapipe();       // fast blink engine (loads once; also covers a camera that was unavailable at start)
+    if (recogReady) loadMediapipe();   // fast blink engine (loads once, after recognition is ready; see loadRecognition)
     return true;
   } catch (err) {
     stopCamera();
@@ -1345,10 +1345,6 @@ async function init() {
   if (!window.crypto || !crypto.subtle) { $('splashStatus').textContent = 'Please open this page over HTTPS.'; return; }
   const t0 = performance.now();
 
-  // face-api.js is deferred (so the splash paints instantly); it keeps loading in the background
-  const libP = faceLibLoaded();
-  libP.catch(() => {});   // handled below, once the app is on screen
-
   setProgress(30, 'Starting camera…');
   startCamera();                              // camera and stored data start together (the camera also starts the blink engine)
   const dataP = loadData();
@@ -1374,6 +1370,10 @@ async function init() {
   if (!camError) setStatus('Starting face engine…', 'wait');
 
   // ---- face engine (background) ----
+  // The camera picture comes first: the face engine's start-up keeps a phone busy for a while,
+  // so it only starts once the camera is showing (at most 4 s wait).
+  await cameraShowing(4000);
+  const libP = faceLibLoaded();
   // If the internet drops while it loads, it tries again by itself (instead of staying broken until someone reloads).
   let recogFile = null, backendSet = false;
   for (let attempt = 1; ; attempt++) {
@@ -1405,6 +1405,15 @@ async function init() {
   perfFrom = performance.now() + 6000;   // ignore start-up warm-up when judging speed
 }
 
+// The MediaPipe blink engine is loaded after recognition is ready: loading it at start-up competed with the face
+// engine for the phone and froze the camera picture. Until it is ready the face-api engine detects blinks.
+// Switching engines restarts face tracking, so it waits for a moment with nobody at the camera (at most 20 s).
+function loadMediapipeWhenQuiet(since) {
+  if (faceLandmarker || mpLoading) return;
+  if (document.hidden || (hadFaceRecently() && Date.now() - since < 20000)) { setTimeout(() => loadMediapipeWhenQuiet(since), 1000); return; }
+  loadMediapipe();
+}
+
 // Phones drop the graphics chip's memory (the WebGL context) under memory pressure or after switching apps.
 // The face engine can't continue after that (its next step simply never finishes), so restart the app soon,
 // whether or not someone is at the camera: nobody can check in until it restarts.
@@ -1428,6 +1437,7 @@ async function loadRecognition(firstTry) {
       await (attempt === 1 && firstTry ? firstTry : faceapi.nets.faceRecognitionNet.isLoaded || faceapi.nets.faceRecognitionNet.loadFromUri(MODEL_URL));
       await warmIdentity();   // prepares the exact recognition steps used at check-in, so the first person never hits a freeze
       recogFailed = false; recogReady = true; tracks.forEach(t => { t.name = null; });
+      loadMediapipeWhenQuiet(Date.now());
       setTimeout(warmWide, 1500);
       setTimeout(() => later(loadBackgroundCheck), 4000);
       return;
@@ -1443,23 +1453,34 @@ async function retryPause(attempt) {
   if (!navigator.onLine) await new Promise(res => window.addEventListener('online', res, { once: true }));
   await timeout(Math.min(60000, 5000 * 2 ** Math.min(attempt - 1, 4)));
 }
-// face-api.js: the page's own script tag the first time; a fresh tag if that download failed
-// (a failed script tag never loads again by itself).
-let libTag = null;
+// face-api.js: the page downloads it early (preload) but it only runs when the app starts it, after the camera
+// picture is up. Starting it is heavy for a phone, and it used to hold the camera back for several seconds.
+// Each call adds a fresh script tag (a failed one never loads again by itself).
+let libP0 = null;
 function faceLibLoaded() {
   if (window.faceapi) return Promise.resolve();
-  return new Promise((res, rej) => {
-    const first = $('faceLib');
-    let el = first;
-    if (libTag === 'failed') {
-      el = document.createElement('script');
-      el.src = first.src; el.integrity = first.integrity; el.crossOrigin = 'anonymous';
-      first.removeAttribute('id'); el.id = 'faceLib';
-      document.head.appendChild(el);
-    }
-    libTag = 'loading';
-    el.addEventListener('load', () => { libTag = 'ok'; if (window.faceapi) res(); else { libTag = 'failed'; rej(new Error('The face library did not start.')); } }, { once: true });
-    el.addEventListener('error', () => { libTag = 'failed'; rej(new Error('Could not load the face library. Check your internet connection.')); }, { once: true });
+  if (libP0) return libP0;
+  return libP0 = new Promise((res, rej) => {
+    const pre = $('faceLib'), el = document.createElement('script');
+    el.src = pre.href; el.integrity = pre.integrity; el.crossOrigin = 'anonymous';
+    el.addEventListener('load', () => { if (window.faceapi) res(); else rej(new Error('The face library did not start.')); }, { once: true });
+    el.addEventListener('error', () => { el.remove(); rej(new Error('Could not load the face library. Check your internet connection.')); }, { once: true });
+    document.head.appendChild(el);
+  }).finally(() => { libP0 = null; });
+}
+// resolves when the camera is showing a moving picture (or after maxMs, so a slow camera never holds up the app)
+function cameraShowing(maxMs) {
+  return new Promise(res => {
+    const done = () => { clearTimeout(t); res(); };
+    const t = setTimeout(res, maxMs);
+    const check = () => {
+      if (video && video.readyState >= 2 && !video.paused) {
+        if (video.requestVideoFrameCallback) video.requestVideoFrameCallback(() => done()); else done();
+        return;
+      }
+      if (!camError) setTimeout(check, 50); else done();
+    };
+    check();
   });
 }
 
