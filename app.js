@@ -128,8 +128,7 @@ function openDB() {
 // a transaction on a connection that has just been closed: forget it, so the next save opens a fresh one
 function dbGone(e) { if (e && (e.name === 'InvalidStateError' || e.name === 'UnknownError')) dbP = null; }
 // Check-in photos live in IndexedDB (big quota), each one encrypted with the device key.
-// The Google Sheet / Drive keep the real copies, so the device keeps only the last PHOTO_KEEP_DAYS days.
-const PHOTO_KEEP_DAYS = 60;
+// The Google Sheet / Drive keep the real copies, so the device keeps only this week's (see pruneOldWeeks).
 async function putPhoto(ts, dataUrl) {
   try {
     const db = await openDB(), val = await seal({ img: dataUrl });
@@ -141,8 +140,8 @@ async function clearPhotos() {
 }
 async function pruneOldPhotos() {
   try {
-    const db = await openDB(), cutoff = Date.now() - PHOTO_KEEP_DAYS * 864e5;
-    await new Promise((res, rej) => { const tx = db.transaction('photos', 'readwrite'); tx.objectStore('photos').delete(IDBKeyRange.upperBound(cutoff)); tx.oncomplete = res; tx.onerror = () => rej(tx.error); });
+    const db = await openDB(), cutoff = weekInfo().start;   // anything before this Monday
+    await new Promise((res, rej) => { const tx = db.transaction('photos', 'readwrite'); tx.objectStore('photos').delete(IDBKeyRange.upperBound(cutoff, true)); tx.oncomplete = res; tx.onerror = () => rej(tx.error); });
   } catch (e) {}
 }
 // The device key, or an error if the storage can't be read right now. fresh = it was just made (the old one is gone).
@@ -281,6 +280,7 @@ async function loadData() {
     } catch (err) { console.warn('Migration failed', err); }
   }
   enrollments = sanitizeEnrollments(e); records = sanitizeRecords(r).sort((a, b) => a.ts - b.ts);
+  try { streakCarry = sanitizeCarry(await unseal(localStorage.getItem(CARRY_KEY))); } catch (err) { streakCarry = null; }
   if (Array.isArray(legacy) && legacy.length && monthsLoaded !== null) {
     // move the previous version's single copy into monthly saves; remove it only once that worked
     try { recAll = true; if (await saveNow() === 'monthly') localStorage.removeItem(KEY.rec); }
@@ -854,21 +854,61 @@ function dayNum(ts) {
 }
 const isWeekendDay = (n) => { const wd = (n + 4) % 7; return wd === 0 || wd === 6; };   // day 0 was a Thursday
 const prevWeekdayNum = (n) => { n--; while (isWeekendDay(n)) n--; return n; };
-function streaks() {
-  const now = new Date(), key = now.toDateString() + '|' + records.length;
-  if (streakCache.key === key) return streakCache.map;
+function presenceDays() {
   const days = new Map();
   for (const r of records) { if (r.sync === 'rejected') continue; let s = days.get(r.name); if (!s) days.set(r.name, s = new Set()); s.add(dayNum(r.ts)); }
+  return days;
+}
+// weekdays in a row present, counting back from day d. Older weeks are deleted from the device, so when the count
+// reaches the last day before the kept records it adds the run remembered at the clean-up (streakCarry).
+function runFrom(set, d, name) {
+  let n = 0;
+  while (set && set.has(d)) { n++; d = prevWeekdayNum(d); }
+  if (streakCarry && d === streakCarry.day) n += streakCarry.runs[name] || 0;
+  return n;
+}
+function streaks() {
+  const now = new Date(), key = now.toDateString() + '|' + records.length + '|' + dataVer;
+  if (streakCache.key === key) return streakCache.map;
+  const days = presenceDays();
   const today = Date.UTC(now.getFullYear(), now.getMonth(), now.getDate()) / 864e5, weekend = isWeekendDay(today);
   const map = new Map();
   for (const [name, set] of days) {
     // today only extends the streak once they check in; not checking in yet doesn't break it
-    let d = (!weekend && set.has(today)) ? today : prevWeekdayNum(today), n = 0;
-    while (set.has(d)) { n++; d = prevWeekdayNum(d); }
-    map.set(name, n);
+    map.set(name, runFrom(set, (!weekend && set.has(today)) ? today : prevWeekdayNum(today), name));
   }
   streakCache = { key, map };
   return map;
+}
+
+/* ---------- weekly clean-up: each device keeps only this week's records ----------
+   From Monday, last week's (and older) check-ins and photos are deleted from the device, so it stays fast.
+   The Google Sheet keeps everything. Enrolled faces and check-ins still waiting to be sent are never deleted.
+   Streaks carry on across the clean-up: each person's run up to last Friday is remembered (encrypted). */
+const CARRY_KEY = 'caipsd_streak_carry';
+let streakCarry = null;   // { day: last weekday before the kept records, runs: { name: days in a row } }
+function sanitizeCarry(v) {
+  if (!v || !Number.isFinite(v.day) || !v.runs || typeof v.runs !== 'object') return null;
+  const runs = {};
+  for (const k of Object.keys(v.runs).slice(0, MAX_ENROLLED)) { const n = v.runs[k]; if (Number.isInteger(n) && n > 0 && n < 10000) runs[clean(k, 60)] = n; }
+  return { day: v.day, runs };
+}
+function pruneOldWeeks() {
+  const cutoff = weekInfo().start;
+  if (!records.some(r => r.ts < cutoff)) return false;
+  const lastDay = prevWeekdayNum(dayNum(cutoff)), days = presenceDays(), runs = {};
+  for (const name of new Set([...days.keys(), ...Object.keys(streakCarry ? streakCarry.runs : {})])) {
+    const n = runFrom(days.get(name), lastDay, name); if (n > 0) runs[name] = n;
+  }
+  const removed = records.length;
+  records = records.filter(r => r.ts >= cutoff);
+  console.info(`Weekly clean-up: removed ${removed - records.length} old record(s) from this device`);
+  streakCarry = { day: lastDay, runs };
+  seal(streakCarry).then(v => { try { localStorage.setItem(CARRY_KEY, v); } catch (e) {} }).catch(() => {});
+  presentCache.key = ''; streakCache.key = ''; dayCache.clear(); logDirty = true; dataVer++;
+  recAll = true; persist();
+  later(pruneOldPhotos);
+  return true;
 }
 
 /* ---------- weekly attendance (Monday to Friday, starts fresh every Monday) ---------- */
@@ -1351,6 +1391,7 @@ async function init() {
 
   // Open the app as soon as the stored data is ready; the face engine finishes loading behind it.
   await dataP; dataVer++;
+  pruneOldWeeks();   // a new week since the app was last open: drop last week's records first (less to draw)
   setProgress(100, 'Ready');
   const minSplash = 450 - (performance.now() - t0);   // just long enough for the logo animation not to flicker
   if (minSplash > 0) await timeout(minSplash);
@@ -1365,7 +1406,7 @@ async function init() {
   outboxReady = true; flushOutbox();   // send anything saved while the device was offline
   // ask the browser never to clear this app's data (enrolled faces, unsent check-ins) when the phone runs low on space
   try { if (navigator.storage && navigator.storage.persist) navigator.storage.persisted().then(p => p || navigator.storage.persist()).catch(() => {}); } catch (e) {}
-  setTimeout(() => later(pruneOldPhotos), 20000);   // tidy old device photos once things are quiet
+  setTimeout(() => later(pruneOldPhotos), 20000);   // tidy last week's device photos once things are quiet
   requestAnimationFrame(render);
   if (!camError) setStatus('Starting face engine…', 'wait');
 
@@ -1566,7 +1607,7 @@ $('enrollSection').addEventListener('keydown', e => { if (e.key === 'Enter') sav
 $('btnExport').addEventListener('click', exportCSV);
 $('btnClear').addEventListener('click', clearRecords);
 $('btnExportWeek').addEventListener('click', exportWeekCSV);
-setInterval(() => { if (records && weekInfo().key !== lastWeekKey) renderLog(); }, 60000);   // rolls over at midnight and every Monday
+setInterval(() => { if (records && weekInfo().key !== lastWeekKey) { pruneOldWeeks(); renderLog(); } }, 60000);   // rolls over at midnight; every Monday last week is cleared
 document.addEventListener('pointerdown', unlockAudio, { passive: true });
 window.addEventListener('online', flushOutbox);
 window.addEventListener('offline', refreshSyncPill);
