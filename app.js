@@ -697,7 +697,7 @@ function updateTracks(faces, t) {
 }
 
 /* ---------- overlay rendering (60 fps, smoothed between detections) ---------- */
-const TONES = { scan: '#5AA2FF', enroll: '#5AA2FF', ok: '#2BD49A', unknown: '#FF6B6B' };
+const TONES = { scan: '#F0D27A', enroll: '#F0D27A', ok: '#2BD49A', unknown: '#FF6B6B' };
 const EYE_OPEN = '#9BE7FF', EYE_SHUT = '#E8C95A', EYE_BLINK = '#2BD49A';
 const rgbaCache = new Map();
 function rgba(hex, a) { const key = hex + a; let v = rgbaCache.get(key); if (!v) { const n = parseInt(hex.slice(1), 16); v = `rgba(${n >> 16},${(n >> 8) & 255},${n & 255},${a})`; rgbaCache.set(key, v); } return v; }
@@ -1270,6 +1270,7 @@ let lastCounts = '';
 function renderLog() {
   const todayN = presentToday().size;
   $('todayPill').textContent = `${todayN} today`;
+  const navCount = $('navLogCount'); if (navCount) navCount.textContent = todayN ? String(todayN) : '';
   $('countPill').textContent = `${records.length} record${records.length === 1 ? '' : 's'}`;
   const counts = todayN + '|' + records.length;
   if (lastCounts && counts !== lastCounts) bump($('todayPill'));
@@ -1399,6 +1400,22 @@ function setMode(m) {
   if (m !== 'enroll') { cancelEnrollment(); clearTimeout(enrollIdleTimer); }
   tracks = []; stepsKey = ''; statusHoldUntil = 0; frameState = ''; frameFace = null;
 }
+
+/* ---------- bottom bar (phones/tablets): camera, this week, log ---------- */
+// the week and log panels slide over the camera, so the camera keeps running underneath;
+// a kiosk left on a panel goes back to the camera by itself after a while
+const PANE_IDLE_MS = 60000;
+let paneTimer = 0;
+function setPane(p) {
+  document.body.dataset.pane = p;
+  document.querySelectorAll('.bnav-btn').forEach(b => { const on = b.dataset.pane === p; b.classList.toggle('active', on); if (on) b.setAttribute('aria-current', 'page'); else b.removeAttribute('aria-current'); });
+  clearTimeout(paneTimer);
+  if (p !== 'cam') { const side = document.querySelector('.side'); if (side) side.scrollTop = 0; paneTimer = setTimeout(() => setPane('cam'), PANE_IDLE_MS); }
+}
+document.querySelectorAll('.bnav-btn').forEach(b => b.addEventListener('click', () => setPane(b.dataset.pane)));
+['pointerdown', 'scroll', 'keydown'].forEach(ev => document.addEventListener(ev, () => {
+  if (document.body.dataset.pane !== 'cam') { clearTimeout(paneTimer); paneTimer = setTimeout(() => setPane('cam'), PANE_IDLE_MS); }
+}, { passive: true, capture: true }));
 
 /* ---------- warm-up: compile GPU shaders before the first real face ---------- */
 function blankCanvas(size) { const c = document.createElement('canvas'); c.width = c.height = size; const g = c.getContext('2d'); g.fillStyle = '#808080'; g.fillRect(0, 0, size, size); return c; }
